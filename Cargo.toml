@@ -1,0 +1,15 @@
+[package]
+name = "keyremap"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.83"
+evdev = "0.12.2"
+num-derive = "0.4.2"
+num-traits = "0.2.19"
+scopeguard = "1.2.0"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
