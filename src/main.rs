@@ -1,4 +1,6 @@
-use std::{cell::RefCell, collections::BTreeMap, thread::sleep, time::Duration, vec};
+use std::{
+    borrow::BorrowMut, cell::RefCell, collections::BTreeMap, thread::sleep, time::Duration, vec,
+};
 
 use anyhow::{bail, Context, Result};
 use evdev::{uinput::VirtualDeviceBuilder, EventType, InputEvent, InputEventKind, Key};
@@ -27,7 +29,6 @@ enum KeyState {
     Pressed,
 }
 
-#[derive()]
 struct ChordState<'a> {
     key_states: BTreeMap<Key, KeyState>,
     active_until: Option<std::time::SystemTime>,
@@ -35,6 +36,7 @@ struct ChordState<'a> {
     execute: &'a dyn Fn() -> Option<Vec<InputEvent>>,
     num_pressed: usize,
     flushing: bool,
+    releasing: bool,
 }
 
 impl<'a> ChordState<'a> {
@@ -48,6 +50,7 @@ impl<'a> ChordState<'a> {
             execute: callback,
             num_pressed: 0,
             flushing: false,
+            releasing: false,
         }
     }
 }
@@ -169,15 +172,20 @@ where
                     KeyAction::Repeat => None,
                 };
                 if let Some(new_state) = new_state_opt {
-                    if chord.flushing {
+                    if chord.flushing || chord.releasing {
+                        let silence = chord.releasing;
                         if new_state == KeyState::Released {
                             chord.num_pressed -= 1;
                             if chord.num_pressed == 0 {
                                 chord.flushing = false;
+                                chord.releasing = false;
                             }
                         }
-                        // Pass the event through
-                        return Ok(ProcessResult::NotProcessed);
+                        // When releasing a chord, we should still silent the release events
+                        if !silence {
+                            // Pass the event through
+                            return Ok(ProcessResult::NotProcessed);
+                        }
                     } else if new_state == KeyState::Pressed {
                         chord.num_pressed += 1;
 
@@ -187,6 +195,7 @@ where
                             if let Some(chord_seq) = chord_result {
                                 (self._emit)(&chord_seq);
                             }
+                            chord.releasing = true;
                         }
                     } else if new_state == KeyState::Released {
                         // Chord is broken
@@ -290,37 +299,20 @@ mod tests {
 
     struct Catcher {
         events: RefCell<Vec<InputEvent>>,
-        // c: Box<dyn Fn(&[InputEvent])>,
     }
 
     impl Catcher {
-        // const c: OnceCell<Box<dyn Fn(&[InputEvent])>> = OnceCell::new();
-
         fn new() -> Self {
             Self {
                 events: RefCell::new(Vec::new()),
                 // c: Box::new(|_| {}),
             }
-            // s.c = Box::new(|evs| {s.events.borrow_mut().extend(evs)});
-            // s
         }
 
         fn catch(&self) -> impl Fn(&[InputEvent]) + '_ {
-            // Self::c.get_or_init(move || {
-            //     Box::new(|ev: &[InputEvent]| {
-            //         self.events.borrow_mut().extend(ev);
-            //     })
-            // })
             |ev: &[InputEvent]| {
                 self.events.borrow_mut().extend(ev);
             }
-        }
-        // fn catch(&self, events: &[InputEvent]) {
-        //     self.events.borrow_mut().extend(events);
-        // }
-
-        fn catch_cb(&self) -> Option<Vec<InputEvent>> {
-            Some(vec![])
         }
     }
 
@@ -446,13 +438,10 @@ mod tests {
     #[test]
     fn test_complete_chord() -> Result<()> {
         let catcher = Catcher::new();
-        // let chord_output = key_ev_seq(&[(Key::KEY_H, Press), (Key::KEY_H, Release)]);
         const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
-        // let chord_output: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
 
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            // &|| Some(key_ev_seq(&[(Key::KEY_H, Press), (Key::KEY_H, Release)])),
             &|| Some(key_ev_seq(CHORD_OUTPUT)),
         )];
 
@@ -465,11 +454,78 @@ mod tests {
         ]);
         input_keys(&mut proc, &keys)?;
         assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
-
-        // Any order is OK
+        
+        // User releases the chord press
+        let keys = key_ev_seq(&[
+            (Key::KEY_A, Release),
+            (Key::KEY_C, Release),
+            (Key::KEY_B, Release),
+        ]);
+        input_keys(&mut proc, &keys)?;
+        assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
 
         Ok(())
     }
+
+    // #[test]
+    // fn test_passthrough_after_chord() -> Result<()> {
+    //     let catcher = Catcher::new();
+    //     const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
+
+    //     let mut chords = [&mut ChordState::new(
+    //         &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
+    //         &|| Some(key_ev_seq(CHORD_OUTPUT)),
+    //     )];
+
+    //     let mut proc = Processor::new(&mut chords, catcher.catch());
+
+    //     let keys = key_ev_seq(&[
+    //         (Key::KEY_A, Press),
+    //         (Key::KEY_B, Press),
+    //         (Key::KEY_C, Press),
+    //         (Key::KEY_G, Press),
+    //     ]);
+    //     input_keys(&mut proc, &keys)?;
+    //     assert_events_eq(
+    //         &catcher.events.borrow(),
+    //         &key_ev_seq(&[CHORD_OUTPUT, &[(Key::KEY_G, Press)]].concat()),
+    //     );
+
+    //     Ok(())
+    // }
+
+    // #[test]
+    // fn test_chord_after_chord() -> Result<()> {
+    //     let catcher = Catcher::new();
+    //     const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
+
+    //     let mut chords = [&mut ChordState::new(
+    //         &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
+    //         &|| Some(key_ev_seq(CHORD_OUTPUT)),
+    //     )];
+
+    //     let mut proc = Processor::new(&mut chords, catcher.catch());
+
+    //     let keys = key_ev_seq(&[
+    //         (Key::KEY_A, Press),
+    //         (Key::KEY_B, Press),
+    //         (Key::KEY_C, Press),
+    //     ]);
+    //     input_keys(&mut proc, &keys)?;
+    //     assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
+
+    //     // Any input order is OK
+    //     let catcher = Catcher::new();
+    //     let keys = key_ev_seq(&[
+    //         (Key::KEY_B, Press),
+    //         (Key::KEY_C, Press),
+    //         (Key::KEY_A, Press),
+    //     ]);
+    //     input_keys(&mut proc, &keys)?;
+    //     assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
+
+    //     Ok(())
+    // }
 
     // #[test]
     // fn test_chord_after_flush() -> Result<()> {
@@ -499,7 +555,7 @@ mod tests {
     //     Ok(())
     // }
 
-    // test_chord_after_chord
+    // fn test_key_repeats()
 
     // fn test_chord_timeout()
 }
