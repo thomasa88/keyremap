@@ -211,10 +211,14 @@ where
                     //*key_state.get_mut() = new_state;
                 }
                 return Ok(ProcessResult::Processed);
-            } else if chord.num_pressed > 0 {
-                // Key outside of chord. Chord is broken. Flush!
-                Self::start_flush(&self._emit, chord, ev)?;
-                return Ok(ProcessResult::Processed);
+            } else {
+                // Key not in chord
+
+                if chord.num_pressed > 0 && !chord.releasing {
+                    // Key outside of active chord. Chord is broken!
+                    Self::start_flush(&self._emit, chord, ev)?;
+                    return Ok(ProcessResult::Processed);
+                }
             }
         }
 
@@ -454,7 +458,7 @@ mod tests {
         ]);
         input_keys(&mut proc, &keys)?;
         assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
-        
+
         // User releases the chord press
         let keys = key_ev_seq(&[
             (Key::KEY_A, Release),
@@ -467,32 +471,40 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn test_passthrough_after_chord() -> Result<()> {
-    //     let catcher = Catcher::new();
-    //     const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
+    #[test]
+    fn test_passthrough_after_chord() -> Result<()> {
+        let catcher = Catcher::new();
+        const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
 
-    //     let mut chords = [&mut ChordState::new(
-    //         &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-    //         &|| Some(key_ev_seq(CHORD_OUTPUT)),
-    //     )];
+        let mut chords = [&mut ChordState::new(
+            &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
+            &|| Some(key_ev_seq(CHORD_OUTPUT)),
+        )];
 
-    //     let mut proc = Processor::new(&mut chords, catcher.catch());
+        let mut proc = Processor::new(&mut chords, catcher.catch());
 
-    //     let keys = key_ev_seq(&[
-    //         (Key::KEY_A, Press),
-    //         (Key::KEY_B, Press),
-    //         (Key::KEY_C, Press),
-    //         (Key::KEY_G, Press),
-    //     ]);
-    //     input_keys(&mut proc, &keys)?;
-    //     assert_events_eq(
-    //         &catcher.events.borrow(),
-    //         &key_ev_seq(&[CHORD_OUTPUT, &[(Key::KEY_G, Press)]].concat()),
-    //     );
+        let keys = key_ev_seq(&[
+            // Press chord
+            (Key::KEY_A, Press),
+            (Key::KEY_B, Press),
+            (Key::KEY_C, Press),
+            // We allow new presses before the chord is fully release
+            (Key::KEY_G, Press),
+            // Release chord
+            (Key::KEY_A, Release),
+            (Key::KEY_B, Release),
+            (Key::KEY_C, Release),
+            // Key after release
+            (Key::KEY_G, Release),
+        ]);
+        input_keys(&mut proc, &keys)?;
+        assert_events_eq(
+            &catcher.events.borrow(),
+            &key_ev_seq(&[CHORD_OUTPUT, &[(Key::KEY_G, Press), (Key::KEY_G, Release)]].concat()),
+        );
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     // #[test]
     // fn test_chord_after_chord() -> Result<()> {
