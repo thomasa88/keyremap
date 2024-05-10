@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.83"
 evdev = "0.12.2"
+itertools = "0.12.1"
 num-derive = "0.4.2"
 num-traits = "0.2.19"
 scopeguard = "1.2.0"
