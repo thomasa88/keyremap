@@ -35,14 +35,14 @@ struct ChordState<'a> {
     key_states: BTreeMap<Key, KeyState>,
     active_until: Option<std::time::SystemTime>,
     // Using an Fn instead of just a vec of InputEvent, to be able to store e.g. layer state
-    execute: &'a dyn Fn() -> Option<Vec<InputEvent>>,
+    execute: &'a mut dyn FnMut() -> Option<Vec<InputEvent>>,
     num_pressed: usize,
     flushing: bool,
     releasing: bool,
 }
 
 impl<'a> ChordState<'a> {
-    fn new(keys: &[Key], callback: &'a dyn Fn() -> Option<Vec<InputEvent>>) -> Self {
+    fn new(keys: &[Key], callback: &'a mut dyn FnMut() -> Option<Vec<InputEvent>>) -> Self {
         Self {
             key_states: keys
                 .iter()
@@ -108,12 +108,13 @@ fn main() -> Result<()> {
     sleep(Duration::from_millis(1000));
     dev.grab()?;
 
-    let mut space_chord = ChordState::new(&[Key::KEY_J, Key::KEY_K], &|| {
+    let action = &mut || {
         Some(vec![
             key_event(Key::KEY_SPACE, KeyAction::Press),
             key_event(Key::KEY_SPACE, KeyAction::Release),
         ])
-    });
+    };
+    let mut space_chord = ChordState::new(&[Key::KEY_J, Key::KEY_K], action);
     let mut chords = [&mut space_chord];
     // Wrapping the keyboard to be able to set up an emit() that is not mutable
     let vkb = RefCell::new(virt_kb);
@@ -343,7 +344,7 @@ mod tests {
                 self.events.borrow_mut().extend(ev);
             }
         }
-        
+
         // TODO: Should be &mut self
         fn reset(&self) {
             self.events.borrow_mut().clear();
@@ -364,9 +365,10 @@ mod tests {
 
     #[test]
     fn test_chord_first_key_press() -> Result<()> {
+        let mut binding = || panic!("Chord executed");
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| panic!("Chord executed"),
+            &mut binding,
         )];
 
         let catcher = Catcher::new();
@@ -381,9 +383,10 @@ mod tests {
 
     #[test]
     fn test_chord_second_key_press() -> Result<()> {
+        let mut binding = || panic!("Chord executed");
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| panic!("Chord executed"),
+            &mut binding,
         )];
 
         let catcher = Catcher::new();
@@ -400,9 +403,10 @@ mod tests {
     fn test_chord_broken_by_other_key() -> Result<()> {
         // All keys should flush if the chord is broken
 
+        let mut binding = || panic!("Chord executed");
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| panic!("Chord executed"),
+            &mut binding,
         )];
 
         let catcher = Catcher::new();
@@ -423,9 +427,10 @@ mod tests {
     fn test_chord_broken_by_release() -> Result<()> {
         // All keys should flush if the chord is broken
 
+        let mut binding = || panic!("Chord executed");
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| panic!("Chord executed"),
+            &mut binding,
         )];
 
         let catcher = Catcher::new();
@@ -445,9 +450,10 @@ mod tests {
     fn test_passthrough_while_flushing() -> Result<()> {
         // All events should be passed through when a chord is breaking up
 
+        let mut binding = || panic!("Chord executed");
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| panic!("Chord executed"),
+            &mut binding,
         )];
 
         let catcher = Catcher::new();
@@ -474,9 +480,10 @@ mod tests {
         let catcher = Catcher::new();
         const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
 
+        let mut binding = || Some(key_ev_seq(CHORD_OUTPUT));
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| Some(key_ev_seq(CHORD_OUTPUT)),
+            &mut binding,
         )];
 
         let mut proc = Processor::new(&mut chords, catcher.catch());
@@ -506,9 +513,10 @@ mod tests {
         let catcher = Catcher::new();
         const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
 
+        let mut binding = || Some(key_ev_seq(CHORD_OUTPUT));
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| Some(key_ev_seq(CHORD_OUTPUT)),
+            &mut binding,
         )];
 
         let mut proc = Processor::new(&mut chords, catcher.catch());
@@ -541,9 +549,10 @@ mod tests {
         let catcher = Catcher::new();
         const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
 
+        let mut binding = || Some(key_ev_seq(CHORD_OUTPUT));
         let mut chords = [&mut ChordState::new(
             &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-            &|| Some(key_ev_seq(CHORD_OUTPUT)),
+            &mut binding,
         )];
 
         let mut proc = Processor::new(&mut chords, catcher.catch());
@@ -572,33 +581,46 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn test_chord_after_flush() -> Result<()> {
-    //     let mut chords = [&mut ChordState::new(
-    //         &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-    //         &|| panic!("Chord executed"),
-    //     )];
+    #[test]
+    fn test_chord_after_flush() -> Result<()> {
+        let mut executed = false;
+        let mut binding = || {
+            executed = true;
+            None
+        };
+        let mut chords = [&mut ChordState::new(
+            &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
+            &mut binding,
+        )];
 
-    //     let catcher = Catcher::new();
-    //     let mut proc = Processor::new(&mut chords, catcher.catch());
+        let catcher = Catcher::new();
+        let mut proc = Processor::new(&mut chords, catcher.catch());
 
-    //     let keys = key_ev_seq(&[
-    //         (Key::KEY_A, Press),
-    //         (Key::KEY_B, Press),
-    //         // Break the chord
-    //         (Key::KEY_G, Press),
-    //         // Release the chord
-    //         (Key::KEY_B, Release),
-    //         (Key::KEY_A, Release),
-    //         // Input the full chord
-    //         (Key::KEY_A, Press),
-    //         (Key::KEY_B, Press),
-    //         (Key::KEY_C, Press),
-    //     ]);
-    //     input_keys(&mut proc, &keys)?;
-    //     assert_events_eq(&catcher.events.borrow(), &keys);
-    //     Ok(())
-    // }
+        let keys = key_ev_seq(&[
+            (Key::KEY_A, Press),
+            (Key::KEY_B, Press),
+            // Break the chord - resulting in a flush
+            (Key::KEY_G, Press),
+            // Release the chord
+            (Key::KEY_B, Release),
+            (Key::KEY_A, Release),
+            // Input the full chord
+            (Key::KEY_A, Press),
+            (Key::KEY_B, Press),
+            (Key::KEY_C, Press),
+        ]);
+        let output_keys = key_ev_seq(&[
+            (Key::KEY_A, Press),
+            (Key::KEY_B, Press),
+            (Key::KEY_G, Press),
+            (Key::KEY_B, Release),
+            (Key::KEY_A, Release),
+        ]);
+        input_keys(&mut proc, &keys)?;
+        assert_events_eq(&catcher.events.borrow(), &output_keys);
+        assert!(executed);
+        Ok(())
+    }
 
     // fn test_key_repeats()
 
