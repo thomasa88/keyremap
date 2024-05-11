@@ -123,7 +123,9 @@ fn main() -> Result<()> {
         ])
     };
     let mut space_chord = ChordState::new(&[Key::KEY_J, Key::KEY_K], action);
-    let mut chords = [&mut space_chord];
+    let action = &mut || None;
+    let mut kill_space_chord = ChordState::new(&[Key::KEY_SPACE], action);
+    let mut chords = [&mut space_chord, &mut kill_space_chord];
     // Wrapping the keyboard to be able to set up an emit() that is not mutable
     let vkb = RefCell::new(virt_kb);
     // let emit_wrapper = RefCell::new(|m| {
@@ -792,6 +794,24 @@ mod tests {
             (Key::KEY_A, Release),
         ]);
         let output_keys = &keys;
+        input_keys(&mut proc, &keys)?;
+        assert_events_eq(&catcher.events.borrow(), &output_keys);
+        Ok(())
+    }
+
+    #[test]
+    fn test_single_key_chord() -> Result<()> {
+        // Just using a single key is a specialization of a chord
+
+        let chord_output = key_ev_seq(&[(Key::KEY_G, Press), (Key::KEY_G, Release)]);
+        let mut binding = || Some(chord_output.clone());
+        let mut chords = [&mut ChordState::new(&[Key::KEY_A], &mut binding)];
+
+        let catcher = Catcher::new();
+        let mut proc = Processor::new(&mut chords, catcher.catch_emit());
+
+        let keys = key_ev_seq(&[(Key::KEY_A, Press), (Key::KEY_A, Release)]);
+        let output_keys = &chord_output;
         input_keys(&mut proc, &keys)?;
         assert_events_eq(&catcher.events.borrow(), &output_keys);
         Ok(())
