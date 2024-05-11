@@ -3,6 +3,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     fmt,
+    sync::BarrierWaitResult,
     thread::sleep,
     time::Duration,
     vec,
@@ -204,7 +205,21 @@ where
                     KeyAction::Release => Some(KeyState::Released),
                     KeyAction::Repeat => None,
                 };
-                if let Some(new_state) = new_state_opt {
+                if action == KeyAction::Repeat
+                    && chord.num_pressed == 1
+                    // Should not really need to check that the key is pressed,
+                    // as repeat implies pressed
+                    && *chord.key_states.get(&event_key).unwrap() == KeyState::Pressed
+                {
+                    if chord.exiting {
+                        chord_result = ProcessResult::NotProcessed;
+                    } else {
+                        // Allow a normal repeat of a key if it is the first of the chord
+                        // The chord will be broken
+                        Self::send_captured_keys(&self._emit, chord, ev)?;
+                        chord.exiting = true;
+                    }
+                } else if let Some(new_state) = new_state_opt {
                     if chord.exiting {
                         assert_ne!(chord.num_pressed, 0);
                         // When releasing a chord, we should still silent the key events
@@ -754,7 +769,33 @@ mod tests {
         Ok(())
     }
 
-    // fn test_repeat_chord_key_outside_chord()
+    #[test]
+    fn test_repeat_chord_key_outside_chord() -> Result<()> {
+        // User should be able to repeat a chord key if it is not building up a chord
+
+        let mut binding = || None;
+        let mut chords = [&mut ChordState::new(
+            &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
+            &mut binding,
+        )];
+
+        let catcher = Catcher::new();
+        let mut proc = Processor::new(&mut chords, catcher.catch_emit());
+
+        let keys = key_ev_seq(&[
+            // Press a key that is part of the chord
+            (Key::KEY_A, Press),
+            (Key::KEY_A, Repeat),
+            (Key::KEY_A, Repeat),
+            (Key::KEY_A, Repeat),
+            (Key::KEY_A, Repeat),
+            (Key::KEY_A, Release),
+        ]);
+        let output_keys = &keys;
+        input_keys(&mut proc, &keys)?;
+        assert_events_eq(&catcher.events.borrow(), &output_keys);
+        Ok(())
+    }
 
     // #[test]
     // fn test_chord_timeout() -> Result<()> {
