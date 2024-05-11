@@ -1,5 +1,6 @@
 use std::{
-    borrow::BorrowMut, cell::RefCell, collections::BTreeMap, thread::sleep, time::Duration, vec,
+    borrow::BorrowMut, cell::RefCell, collections::BTreeMap, fmt, thread::sleep, time::Duration,
+    vec,
 };
 
 use anyhow::{bail, Context, Result};
@@ -23,12 +24,13 @@ impl TryFrom<i32> for KeyAction {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum KeyState {
     Released,
     Pressed,
 }
 
+// #[derive(Debug)]
 struct ChordState<'a> {
     key_states: BTreeMap<Key, KeyState>,
     active_until: Option<std::time::SystemTime>,
@@ -52,6 +54,28 @@ impl<'a> ChordState<'a> {
             flushing: false,
             releasing: false,
         }
+    }
+}
+
+// struct ExecuteFn<'a> (&'a dyn Fn() -> Option<Vec<InputEvent>>);
+
+// impl<'a> fmt::Debug for ExecuteFn<'a> {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         f.write_str("ExecuteFn")
+//     }
+// }
+
+// Manual impl of Debug, since dyn Fn() is not Debug
+// TODO: How to make execute Debug instead?
+impl<'a> fmt::Debug for ChordState<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChordState")
+            .field("key_states", &self.key_states)
+            .field("active_until", &self.active_until)
+            .field("num_pressed", &self.num_pressed)
+            .field("flushing", &self.flushing)
+            .field("releasing", &self.releasing)
+            .finish_non_exhaustive()
     }
 }
 
@@ -192,6 +216,7 @@ where
                         if chord.num_pressed == chord.key_states.len() {
                             // Chord completed!
                             let chord_result = (chord.execute)();
+                            dbg!(&chord_result);
                             if let Some(chord_seq) = chord_result {
                                 (self._emit)(&chord_seq);
                             }
@@ -317,6 +342,11 @@ mod tests {
             |ev: &[InputEvent]| {
                 self.events.borrow_mut().extend(ev);
             }
+        }
+        
+        // TODO: Should be &mut self
+        fn reset(&self) {
+            self.events.borrow_mut().clear();
         }
     }
 
@@ -506,38 +536,41 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn test_chord_after_chord() -> Result<()> {
-    //     let catcher = Catcher::new();
-    //     const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
+    #[test]
+    fn test_chord_after_chord() -> Result<()> {
+        let catcher = Catcher::new();
+        const CHORD_OUTPUT: &[(Key, KeyAction)] = &[(Key::KEY_H, Press), (Key::KEY_H, Release)];
 
-    //     let mut chords = [&mut ChordState::new(
-    //         &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
-    //         &|| Some(key_ev_seq(CHORD_OUTPUT)),
-    //     )];
+        let mut chords = [&mut ChordState::new(
+            &[Key::KEY_A, Key::KEY_B, Key::KEY_C],
+            &|| Some(key_ev_seq(CHORD_OUTPUT)),
+        )];
 
-    //     let mut proc = Processor::new(&mut chords, catcher.catch());
+        let mut proc = Processor::new(&mut chords, catcher.catch());
 
-    //     let keys = key_ev_seq(&[
-    //         (Key::KEY_A, Press),
-    //         (Key::KEY_B, Press),
-    //         (Key::KEY_C, Press),
-    //     ]);
-    //     input_keys(&mut proc, &keys)?;
-    //     assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
+        let keys = key_ev_seq(&[
+            (Key::KEY_A, Press),
+            (Key::KEY_B, Press),
+            (Key::KEY_C, Press),
+            (Key::KEY_A, Release),
+            (Key::KEY_B, Release),
+            (Key::KEY_C, Release),
+        ]);
+        input_keys(&mut proc, &keys)?;
+        assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
 
-    //     // Any input order is OK
-    //     let catcher = Catcher::new();
-    //     let keys = key_ev_seq(&[
-    //         (Key::KEY_B, Press),
-    //         (Key::KEY_C, Press),
-    //         (Key::KEY_A, Press),
-    //     ]);
-    //     input_keys(&mut proc, &keys)?;
-    //     assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
+        // Any input order is OK
+        catcher.reset();
+        let keys = key_ev_seq(&[
+            (Key::KEY_B, Press),
+            (Key::KEY_C, Press),
+            (Key::KEY_A, Press),
+        ]);
+        input_keys(&mut proc, &keys)?;
+        assert_events_eq(&catcher.events.borrow(), &key_ev_seq(CHORD_OUTPUT));
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 
     // #[test]
     // fn test_chord_after_flush() -> Result<()> {
