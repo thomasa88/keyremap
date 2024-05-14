@@ -1,16 +1,19 @@
-use std::{cell::OnceCell, marker::PhantomData, sync::Once, vec};
+use std::{cell::OnceCell, collections::HashMap, marker::PhantomData, sync::Once, vec};
 
 use anyhow::{Context, Result};
 use evdev::{
-    uinput::{VirtualDevice, VirtualDeviceBuilder}, Device, InputEvent, Key
+    uinput::{VirtualDevice, VirtualDeviceBuilder},
+    Device, EventType, InputEvent, Key,
 };
-use tracing_subscriber::layer;
+use num_traits::FromPrimitive;
+use scopeguard::{defer, guard};
+use tracing_subscriber::{filter, layer};
 
-type ActionFn = Box<dyn Fn(&mut Processor) -> Result<()>>;
+type ActionFn = Box<dyn Fn(ProcView) -> Result<HandleResult>>;
 
 struct Layer {
     id: usize,
-    handlers: Vec<Box<dyn KeyEventHandler>>,
+    handlers: HashMap<KeyEventFilter, Vec<Box<dyn KeyEventHandler>>>,
 }
 
 impl Layer {
@@ -19,8 +22,15 @@ impl Layer {
     //     }
     // }
 
-    fn add_key_press(&mut self, key: Key, action: ActionFn) {
-        self.handlers.push(Box::new(KeyPress { key, action }));
+    fn add_key_press(&mut self, key: Key, dir: KeyEventValue, action: ActionFn) {
+        let filter = KeyEventFilter {
+            key_code: key.code(),
+            dir,
+        };
+        self.handlers
+            .entry(filter)
+            .or_default()
+            .push(Box::new(KeyPress { filter, action }));
     }
 }
 
@@ -38,25 +48,47 @@ impl LayerFactory {
         self.next_id += 1;
         Layer {
             id,
-            handlers: vec![],
+            handlers: HashMap::new(),
         }
     }
 }
 
+// #[derive(PartialEq, Eq, Hash)]
+// enum KeyEventValue {
+//     Down,
+//     Up,
+//     // Both,
+// }
+
+#[derive(num_derive::FromPrimitive, Debug, PartialEq, Clone, Copy, Eq, Hash)]
+enum KeyEventValue {
+    Release = 0,
+    Press = 1,
+    Repeat = 2,
+}
+
+#[derive(Eq, Hash, PartialEq, Copy, Clone)]
+struct KeyEventFilter {
+    key_code: u16,
+    dir: KeyEventValue,
+}
 struct KeyPress {
-    key: Key,
+    filter: KeyEventFilter,
     action: ActionFn,
 }
 
 impl KeyEventHandler for KeyPress {
-    fn handle_event(&self, proc: ProcView) -> Result<HandleResult> {
-        Ok(HandleResult::NotHandled)
+    fn handle_event(&mut self, pv: ProcView) -> Result<HandleResult> {
+        (self.action)(pv)
     }
+
+    fn reset(&mut self) {}
 }
 
 trait KeyEventHandler {
     // fn handle_event(&self, proc: &mut Processor) -> Result<HandleResult>;
-    fn handle_event(&self, proc: ProcView) -> Result<HandleResult>;
+    fn handle_event(&mut self, pv: ProcView) -> Result<HandleResult>;
+    fn reset(&mut self);
 }
 
 enum HandleResult {
@@ -79,9 +111,10 @@ struct Processor<'a> {
 }
 
 struct ProcView<'v> {
-    // event: &'v InputEvent,
-    active_layer: &'v usize,
-    output_kb: &'v VirtualDevice,
+    // Provide full event, to allow for multiple keys handled by same handler as well as timeout handling
+    event: &'v InputEvent,
+    active_layer_id: &'v mut usize,
+    output_kb: &'v mut VirtualDevice,
 }
 
 impl<'a> ProcView<'a> {
@@ -104,47 +137,56 @@ impl<'a> Processor<'a> {
     }
 
     fn run(&mut self) -> Result<()> {
-        //// cannot pass self to action, as we will already have a mut borrow?
-        // self.active_layer = Some(&mut self.layers[0]);
-        //self.set_active_layer(&self.layers[0]);
-        // Self::reset_layer(&mut self.layers[self.active_layer_id]);
-        // self.active_layer_id = 0;
-        // wrap in a loop?
-        for event in self.input_kb.fetch_events()? {
-            let active_layer = self
-                .layers
-                .get_mut(self.active_layer_id)
-                .context("No active layer set")?;
-            let mut layer_switch = false;
-            let old_layer_id = self.active_layer_id;
-            for handler in &active_layer.handlers {
-                handler.handle_event(ProcView {
-                    active_layer: &self.active_layer_id,
-                    output_kb: &self.output_kb,
-                })?;
-                if self.active_layer_id != old_layer_id {
-                    layer_switch = true;
-                    break;
-                    // Layer switch!
-                    // Self::reset_layer(
-                    //     self.layers
-                    //         .get_mut(old_layer_id)
-                    //         .context("Invalid layer id: ")?,
-                    // );
+        // Make sure that keyboard input is restored on program exit
+        let mut input_kb = guard(&mut self.input_kb, |kb| {
+            kb.ungrab().unwrap();
+        });
+
+        loop {
+            for event in input_kb.fetch_events()? {
+                if event.event_type() != EventType::KEY {
+                    self.output_kb.emit(&[event])?;
+                    continue;
                 }
-            }
-            if layer_switch {
-                // New layer ID already set by callback
-                Self::reset_layer(
-                    self.layers
-                        .get_mut(old_layer_id)
-                        .context("Invalid layer id: ")?,
-                );
+
+                let active_layer = self
+                    .layers
+                    .get_mut(self.active_layer_id)
+                    .context("No active layer set")?;
+                let mut layer_switch = false;
+                let old_layer_id = self.active_layer_id;
+                let dir = FromPrimitive::from_i32(event.value())
+                    .context(format!("Bad key event value: {}", event.value()))?;
+                let filter = KeyEventFilter {
+                    key_code: event.code(),
+                    dir,
+                };
+                if let Some(handlers) = &mut active_layer.handlers.get_mut(&filter) {
+                    for handler in &mut **handlers {
+                        handler.handle_event(ProcView {
+                            event: &event,
+                            active_layer_id: &mut self.active_layer_id,
+                            output_kb: &mut self.output_kb,
+                        })?;
+                        if self.active_layer_id != old_layer_id {
+                            layer_switch = true;
+                            break;
+                        }
+                    }
+                    if layer_switch {
+                        // New layer ID already set by callback
+                        Self::reset_layer(
+                            self.layers
+                                .get_mut(old_layer_id)
+                                .context("Invalid layer id: ")?,
+                        );
+                    }
+                }
             }
         }
         // let s = self.layers[0].handlers[0].as_mut().handle_event(&mut *self);
         // self.active_layer = Some(&mut self.layers[0]);
-        Ok(())
+        // Ok(())
     }
 
     // fn set_active_layer(&mut self, new_layer: &Layer) {
@@ -162,13 +204,18 @@ impl<'a> Processor<'a> {
     }
 }
 
+fn key_event(key: Key, action: KeyEventValue) -> InputEvent {
+    InputEvent::new(EventType::KEY, key.code(), action as i32)
+}
+
 fn main() -> Result<()> {
-    let mut virt_kb = VirtualDeviceBuilder::new()?
+    let input_kb = Device::open("/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-kbd")?;
+
+    let supported_keys = input_kb.supported_keys().context("Failed to get keys")?;
+    let virt_kb = VirtualDeviceBuilder::new()?
         .name("keyremap")
-        // .with_keys(&keys)?
+        .with_keys(&supported_keys)?
         .build()?;
-    let mut unguarded_dev =
-        Device::open("/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-kbd")?;
 
     let mut lf = LayerFactory::new();
     const FIRST_LAYER_ID: usize = 0;
@@ -177,19 +224,31 @@ fn main() -> Result<()> {
 
     first_layer.add_key_press(
         Key::KEY_F,
+        KeyEventValue::Press,
         Box::new(|p| {
-            p.active_layer_id = FIRST_LAYER_ID;
-            Ok(())
+            *p.active_layer_id = FIRST_LAYER_ID;
+            Ok(HandleResult::Handled)
+        }),
+    );
+    first_layer.add_key_press(
+        Key::KEY_J,
+        KeyEventValue::Press,
+        Box::new(|p| {
+            p.output_kb.emit(&[
+                key_event(Key::KEY_U, KeyEventValue::Press),
+                key_event(Key::KEY_U, KeyEventValue::Release),
+            ])?;
+            Ok(HandleResult::Handled)
         }),
     );
 
     let layers = vec![first_layer];
-    let mut proc = Processor::new(unguarded_dev, virt_kb, layers);
+    let mut proc = Processor::new(input_kb, virt_kb, layers);
 
     // let l = proc.layers.get(id).unwrap();
     // proc.set_active_layer(&l);
 
-    proc.run();
+    proc.run()?;
 
     Ok(())
 }
