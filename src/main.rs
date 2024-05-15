@@ -1,4 +1,4 @@
-use std::{cell::OnceCell, collections::HashMap, marker::PhantomData, sync::Once, vec};
+use std::{cell::OnceCell, collections::HashMap, marker::PhantomData, sync::Once, time::Duration, vec};
 
 use anyhow::{Context, Result};
 use evdev::{
@@ -13,7 +13,7 @@ type ActionFn = Box<dyn Fn(ProcView) -> Result<HandleResult>>;
 
 struct Layer {
     id: usize,
-    handlers: HashMap<KeyEventFilter, Vec<Box<dyn KeyEventHandler>>>,
+    handler_map: HashMap<KeyEventFilter, Vec<Box<dyn KeyEventHandler>>>,
 }
 
 impl Layer {
@@ -22,12 +22,11 @@ impl Layer {
     //     }
     // }
 
-    fn add_key_press(&mut self, key: Key, dir: KeyEventValue, action: ActionFn) {
+    fn add_key_press(&mut self, key: Key, action: ActionFn) {
         let filter = KeyEventFilter {
             key_code: key.code(),
-            dir,
         };
-        self.handlers
+        self.handler_map
             .entry(filter)
             .or_default()
             .push(Box::new(KeyPress { filter, action }));
@@ -48,7 +47,7 @@ impl LayerFactory {
         self.next_id += 1;
         Layer {
             id,
-            handlers: HashMap::new(),
+            handler_map: HashMap::new(),
         }
     }
 }
@@ -67,10 +66,40 @@ enum KeyEventValue {
     Repeat = 2,
 }
 
+struct NiceKeyInputEvent {
+    // pub time: ::timeval,
+    // pub type_: ::__u16,
+    // pub code: ::__u16,
+    // pub value: ::__s32,
+    key: Key,
+    value: KeyEventValue,
+}
+
+impl From<InputEvent> for NiceKeyInputEvent {
+    fn from(event: InputEvent) -> Self {
+        assert_eq!(event.event_type(), EventType::KEY);
+        Self {
+            key: Key::new(event.code()),
+            value: FromPrimitive::from_i32(event.value()).unwrap(),
+        }
+    }
+}
+
+impl From<NiceKeyInputEvent> for InputEvent {
+    fn from(nice: NiceKeyInputEvent) -> Self {
+        InputEvent::new(EventType::KEY, nice.key.code(), nice.value as i32)
+    }
+}
+
+impl NiceKeyInputEvent {
+    fn new(key: Key, value: KeyEventValue) -> Self {
+        Self { key, value }
+    }
+}
+
 #[derive(Eq, Hash, PartialEq, Copy, Clone)]
 struct KeyEventFilter {
     key_code: u16,
-    dir: KeyEventValue,
 }
 struct KeyPress {
     filter: KeyEventFilter,
@@ -91,6 +120,7 @@ trait KeyEventHandler {
     fn reset(&mut self);
 }
 
+#[derive(Debug, PartialEq)]
 enum HandleResult {
     Handled,
     NotHandled,
@@ -112,7 +142,8 @@ struct Processor<'a> {
 
 struct ProcView<'v> {
     // Provide full event, to allow for multiple keys handled by same handler as well as timeout handling
-    event: &'v InputEvent,
+    //event: &'v InputEvent,
+    event: &'v NiceKeyInputEvent,
     active_layer_id: &'v mut usize,
     output_kb: &'v mut VirtualDevice,
 }
@@ -125,15 +156,13 @@ impl<'a> Processor<'a> {
     fn new(input_kb: Device, output_kb: VirtualDevice, layers: Vec<Layer>) -> Self {
         assert!(layers.len() > 0);
         let first_layer_id = layers[0].id;
-        let p = Self {
+        Self {
             input_kb,
             output_kb,
             layers: layers,
             active_layer_id: first_layer_id,
             _phantom_data: PhantomData,
-        };
-        // p.active_layer = Some(p.layers.get_mut(0).unwrap());
-        p
+        }
     }
 
     fn run(&mut self) -> Result<()> {
@@ -141,6 +170,28 @@ impl<'a> Processor<'a> {
         let mut input_kb = guard(&mut self.input_kb, |kb| {
             kb.ungrab().unwrap();
         });
+        
+        // Release all keys that were down during grab, to avoid them being pressed
+        // when we ungrab
+        // let pressed_keys: Vec<_> = input_kb
+        //     .get_key_state()?
+        //     .into_iter()
+        //     .map(|key| {
+        //         NiceKeyInputEvent {
+        //             key,
+        //             value: KeyEventValue::Release,
+        //         }
+        //         .into()
+        //     })
+        //     .collect();
+        // self.output_kb.emit(&pressed_keys)?;
+        
+        // Wait for all current key presses to be released, to avoid them being
+        // still pressed after ungrab
+        while input_kb.get_key_state()?.into_iter().len() > 0 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        input_kb.grab()?;
 
         loop {
             for event in input_kb.fetch_events()? {
@@ -155,21 +206,24 @@ impl<'a> Processor<'a> {
                     .context("No active layer set")?;
                 let mut layer_switch = false;
                 let old_layer_id = self.active_layer_id;
-                let dir = FromPrimitive::from_i32(event.value())
-                    .context(format!("Bad key event value: {}", event.value()))?;
                 let filter = KeyEventFilter {
                     key_code: event.code(),
-                    dir,
                 };
-                if let Some(handlers) = &mut active_layer.handlers.get_mut(&filter) {
+                let mut handle_result = HandleResult::NotHandled;
+                if let Some(handlers) = &mut active_layer.handler_map.get_mut(&filter) {
                     for handler in &mut **handlers {
-                        handler.handle_event(ProcView {
-                            event: &event,
+                        handle_result = handler.handle_event(ProcView {
+                            event: &event.into(),
                             active_layer_id: &mut self.active_layer_id,
                             output_kb: &mut self.output_kb,
                         })?;
                         if self.active_layer_id != old_layer_id {
                             layer_switch = true;
+                            break;
+                        }
+                        if handle_result == HandleResult::Handled {
+                            // Only allowing one active event per key
+                            // Good or bad?
                             break;
                         }
                     }
@@ -182,31 +236,26 @@ impl<'a> Processor<'a> {
                         );
                     }
                 }
+                if handle_result == HandleResult::NotHandled {
+                    self.output_kb.emit(&[event])?;
+                }
             }
         }
-        // let s = self.layers[0].handlers[0].as_mut().handle_event(&mut *self);
-        // self.active_layer = Some(&mut self.layers[0]);
-        // Ok(())
     }
-
-    // fn set_active_layer(&mut self, new_layer: &Layer) {
-    // fn set_active_layer(&mut self, new_layer_id: usize) -> Result<()> {
-    //     // Reset the loaded layer instead?
-    //     let old_layer_id = self.active_layer_id;
-    //     Self::reset_layer(&mut self.layers.get_mut(old_layer_id).unwrap());
-    //     self.active_layer_id = new_layer_id;
-    //     Ok(())
-    // }
 
     fn reset_layer(layer: &mut Layer) {
-        //// go through layer and reset handlers/state
         //// Reset press state from old layer? All except layer button should flush? chords can either just reset - and the keys will then send spurious releases, or they can send press+release for the captured buttons
+        for handlers in layer.handler_map.values_mut() {
+            for handler in handlers {
+                handler.reset();
+            }
+        }
     }
 }
 
-fn key_event(key: Key, action: KeyEventValue) -> InputEvent {
-    InputEvent::new(EventType::KEY, key.code(), action as i32)
-}
+// fn key_event(key: Key, action: KeyEventValue) -> InputEvent {
+//     InputEvent::new(EventType::KEY, key.code(), action as i32)
+// }
 
 fn main() -> Result<()> {
     let input_kb = Device::open("/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-kbd")?;
@@ -224,20 +273,21 @@ fn main() -> Result<()> {
 
     first_layer.add_key_press(
         Key::KEY_F,
-        KeyEventValue::Press,
         Box::new(|p| {
-            *p.active_layer_id = FIRST_LAYER_ID;
-            Ok(HandleResult::Handled)
+            if p.event.value == KeyEventValue::Press {
+                *p.active_layer_id = FIRST_LAYER_ID;
+                Ok(HandleResult::Handled)
+            } else {
+                // Just silence the release
+                Ok(HandleResult::Handled)
+            }
         }),
     );
     first_layer.add_key_press(
         Key::KEY_J,
-        KeyEventValue::Press,
         Box::new(|p| {
-            p.output_kb.emit(&[
-                key_event(Key::KEY_U, KeyEventValue::Press),
-                key_event(Key::KEY_U, KeyEventValue::Release),
-            ])?;
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_U, p.event.value).into()])?;
             Ok(HandleResult::Handled)
         }),
     );
