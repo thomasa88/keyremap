@@ -1,4 +1,6 @@
-use std::{cell::OnceCell, collections::HashMap, marker::PhantomData, sync::Once, time::Duration, vec};
+use std::{
+    cell::OnceCell, collections::HashMap, marker::PhantomData, sync::Once, time::Duration, vec,
+};
 
 use anyhow::{Context, Result};
 use evdev::{
@@ -14,13 +16,17 @@ type ActionFn = Box<dyn Fn(ProcView) -> Result<HandleResult>>;
 struct Layer {
     id: usize,
     handler_map: HashMap<KeyEventFilter, Vec<Box<dyn KeyEventHandler>>>,
+    silence_unmapped: bool,
 }
 
 impl Layer {
-    // fn new() -> Layer {
-    //     Layer {
-    //     }
-    // }
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            handler_map: HashMap::new(),
+            silence_unmapped: false,
+        }
+    }
 
     fn add_key_press(&mut self, key: Key, action: ActionFn) {
         let filter = KeyEventFilter {
@@ -30,25 +36,6 @@ impl Layer {
             .entry(filter)
             .or_default()
             .push(Box::new(KeyPress { filter, action }));
-    }
-}
-
-struct LayerFactory {
-    next_id: usize,
-}
-
-impl LayerFactory {
-    fn new() -> Self {
-        Self { next_id: 0 }
-    }
-
-    fn create_layer(&mut self) -> Layer {
-        let id = self.next_id;
-        self.next_id += 1;
-        Layer {
-            id,
-            handler_map: HashMap::new(),
-        }
     }
 }
 
@@ -170,22 +157,7 @@ impl<'a> Processor<'a> {
         let mut input_kb = guard(&mut self.input_kb, |kb| {
             kb.ungrab().unwrap();
         });
-        
-        // Release all keys that were down during grab, to avoid them being pressed
-        // when we ungrab
-        // let pressed_keys: Vec<_> = input_kb
-        //     .get_key_state()?
-        //     .into_iter()
-        //     .map(|key| {
-        //         NiceKeyInputEvent {
-        //             key,
-        //             value: KeyEventValue::Release,
-        //         }
-        //         .into()
-        //     })
-        //     .collect();
-        // self.output_kb.emit(&pressed_keys)?;
-        
+
         // Wait for all current key presses to be released, to avoid them being
         // still pressed after ungrab
         while input_kb.get_key_state()?.into_iter().len() > 0 {
@@ -210,6 +182,7 @@ impl<'a> Processor<'a> {
                     key_code: event.code(),
                 };
                 let mut handle_result = HandleResult::NotHandled;
+                let silence_unmapped = active_layer.silence_unmapped;
                 if let Some(handlers) = &mut active_layer.handler_map.get_mut(&filter) {
                     for handler in &mut **handlers {
                         handle_result = handler.handle_event(ProcView {
@@ -234,9 +207,10 @@ impl<'a> Processor<'a> {
                                 .get_mut(old_layer_id)
                                 .context("Invalid layer id: ")?,
                         );
+                        dbg!(self.active_layer_id);
                     }
                 }
-                if handle_result == HandleResult::NotHandled {
+                if handle_result == HandleResult::NotHandled && !silence_unmapped {
                     self.output_kb.emit(&[event])?;
                 }
             }
@@ -266,37 +240,76 @@ fn main() -> Result<()> {
         .with_keys(&supported_keys)?
         .build()?;
 
-    let mut lf = LayerFactory::new();
-    const FIRST_LAYER_ID: usize = 0;
-    let mut first_layer = lf.create_layer();
-    first_layer.id = FIRST_LAYER_ID;
+    const HOME_LAYER_ID: usize = 0;
+    const NAV_LAYER_ID: usize = 1;
+    let mut home_layer = Layer::new(HOME_LAYER_ID);
+    let mut nav_layer = Layer::new(NAV_LAYER_ID);
 
-    first_layer.add_key_press(
-        Key::KEY_F,
+    home_layer.add_key_press(
+        Key::KEY_D,
         Box::new(|p| {
-            if p.event.value == KeyEventValue::Press {
-                *p.active_layer_id = FIRST_LAYER_ID;
-                Ok(HandleResult::Handled)
-            } else {
-                // Just silence the release
-                Ok(HandleResult::Handled)
+            // TODO: Use time instead of repeat/release to skip layer trigger
+            if p.event.value == KeyEventValue::Repeat {
+                *p.active_layer_id = NAV_LAYER_ID;
+                println!("Nav layer");
+            } else if p.event.value == KeyEventValue::Release {
+                p.output_kb.emit(&[
+                    NiceKeyInputEvent::new(Key::KEY_D, KeyEventValue::Press).into(),
+                    NiceKeyInputEvent::new(Key::KEY_D, KeyEventValue::Release).into(),
+                ])?;
             }
-        }),
-    );
-    first_layer.add_key_press(
-        Key::KEY_J,
-        Box::new(|p| {
-            p.output_kb
-                .emit(&[NiceKeyInputEvent::new(Key::KEY_U, p.event.value).into()])?;
+            // Just silence any release or repeat
             Ok(HandleResult::Handled)
         }),
     );
 
-    let layers = vec![first_layer];
-    let mut proc = Processor::new(input_kb, virt_kb, layers);
+    nav_layer.silence_unmapped = true;
+    nav_layer.add_key_press(
+        Key::KEY_D,
+        Box::new(|p| {
+            if p.event.value == KeyEventValue::Release {
+                *p.active_layer_id = HOME_LAYER_ID;
+                println!("Home layer");
+            }
+            // Just silence any press or repeat
+            Ok(HandleResult::Handled)
+        }),
+    );
+    nav_layer.add_key_press(
+        Key::KEY_I,
+        Box::new(|p| {
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_UP, p.event.value).into()])?;
+            Ok(HandleResult::Handled)
+        }),
+    );
+    nav_layer.add_key_press(
+        Key::KEY_K,
+        Box::new(|p| {
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_DOWN, p.event.value).into()])?;
+            Ok(HandleResult::Handled)
+        }),
+    );
+    nav_layer.add_key_press(
+        Key::KEY_J,
+        Box::new(|p| {
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_LEFT, p.event.value).into()])?;
+            Ok(HandleResult::Handled)
+        }),
+    );
+    nav_layer.add_key_press(
+        Key::KEY_L,
+        Box::new(|p| {
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_RIGHT, p.event.value).into()])?;
+            Ok(HandleResult::Handled)
+        }),
+    );
 
-    // let l = proc.layers.get(id).unwrap();
-    // proc.set_active_layer(&l);
+    let layers = vec![home_layer, nav_layer];
+    let mut proc = Processor::new(input_kb, virt_kb, layers);
 
     proc.run()?;
 
