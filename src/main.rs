@@ -1,8 +1,16 @@
 use std::{
-    cell::OnceCell, collections::HashMap, marker::PhantomData, sync::Once, time::Duration, vec,
+    cell::{OnceCell, RefCell},
+    collections::HashMap,
+    io,
+    marker::PhantomData,
+    rc::Rc,
+    sync::Once,
+    time::Duration,
+    vec,
 };
 
 use anyhow::{Context, Result};
+use chord::ChordHandler;
 use evdev::{
     uinput::{VirtualDevice, VirtualDeviceBuilder},
     Device, EventType, InputEvent, Key,
@@ -11,11 +19,13 @@ use num_traits::FromPrimitive;
 use scopeguard::{defer, guard};
 use tracing_subscriber::{filter, layer};
 
+mod chord;
+
 type ActionFn = Box<dyn Fn(ProcView) -> Result<HandleResult>>;
 
 struct Layer {
     id: usize,
-    handler_map: HashMap<KeyEventFilter, Vec<Box<dyn KeyEventHandler>>>,
+    handler_map: HashMap<KeyEventFilter, Vec<Rc<RefCell<dyn KeyEventHandler>>>>,
     silence_unmapped: bool,
 }
 
@@ -35,7 +45,20 @@ impl Layer {
         self.handler_map
             .entry(filter)
             .or_default()
-            .push(Box::new(KeyPress { filter, action }));
+            .push(Rc::new(RefCell::new(KeyPress { filter, action })));
+    }
+
+    fn add_chord(&mut self, keys: &[Key], action: ActionFn) {
+        let key_handler = Rc::new(RefCell::new(ChordHandler::new(keys, action)));
+        for key in keys {
+            let filter = KeyEventFilter {
+                key_code: key.code(),
+            };
+            self.handler_map
+                .entry(filter)
+                .or_default()
+                .push(key_handler.clone());
+        }
     }
 }
 
@@ -53,6 +76,7 @@ enum KeyEventValue {
     Repeat = 2,
 }
 
+#[derive(Debug, Clone, Copy)]
 struct NiceKeyInputEvent {
     // pub time: ::timeval,
     // pub type_: ::__u16,
@@ -156,6 +180,8 @@ impl<'a> Processor<'a> {
         // Make sure that keyboard input is restored on program exit
         let mut input_kb = guard(&mut self.input_kb, |kb| {
             kb.ungrab().unwrap();
+            // Do we have to release any pressed keys on exit or is that solved by the
+            // virtual device being removed?
         });
 
         // Wait for all current key presses to be released, to avoid them being
@@ -185,7 +211,7 @@ impl<'a> Processor<'a> {
                 let silence_unmapped = active_layer.silence_unmapped;
                 if let Some(handlers) = &mut active_layer.handler_map.get_mut(&filter) {
                     for handler in &mut **handlers {
-                        handle_result = handler.handle_event(ProcView {
+                        handle_result = handler.borrow_mut().handle_event(ProcView {
                             event: &event.into(),
                             active_layer_id: &mut self.active_layer_id,
                             output_kb: &mut self.output_kb,
@@ -221,7 +247,7 @@ impl<'a> Processor<'a> {
         //// Reset press state from old layer? All except layer button should flush? chords can either just reset - and the keys will then send spurious releases, or they can send press+release for the captured buttons
         for handlers in layer.handler_map.values_mut() {
             for handler in handlers {
-                handler.reset();
+                handler.borrow_mut().reset();
             }
         }
     }
@@ -259,6 +285,19 @@ fn main() -> Result<()> {
                 ])?;
             }
             // Just silence any release or repeat
+            Ok(HandleResult::Handled)
+        }),
+    );
+    home_layer.add_chord(
+        &[Key::KEY_U, Key::KEY_I],
+        Box::new(|pv| {
+            pv.output_kb.emit(
+                &[
+                    NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Press),
+                    NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Release),
+                ]
+                .map(|e| e.into()),
+            )?;
             Ok(HandleResult::Handled)
         }),
     );
