@@ -11,15 +11,53 @@ use std::{
 
 use anyhow::{Context, Result};
 use chord::ChordHandler;
-use evdev::{
-    uinput::{VirtualDevice, VirtualDeviceBuilder},
-    Device, EventType, InputEvent, Key,
-};
+use evdev::{AttributeSetRef, Device, EventType, InputEvent, Key};
 use num_traits::FromPrimitive;
 use scopeguard::{defer, guard};
+use tracing::event;
 use tracing_subscriber::{filter, layer};
 
 mod chord;
+
+#[cfg(not(test))]
+use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
+
+// Primitive mocking of VirtualDevice
+#[cfg(test)]
+#[derive(Default)]
+struct VirtualDevice {
+    log: Vec<InputEvent>,
+}
+
+#[cfg(test)]
+impl VirtualDevice {
+    fn emit(&mut self, messages: &[InputEvent]) -> Result<(), std::io::Error> {
+        self.log.extend(messages);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+struct VirtualDeviceBuilder {}
+
+#[cfg(test)]
+impl VirtualDeviceBuilder {
+    fn new() -> Result<Self> {
+        Ok(Self {})
+    }
+
+    fn name(&mut self, _: &str) -> &mut Self {
+        self
+    }
+
+    fn with_keys(&mut self, _: &AttributeSetRef<Key>) -> Result<&mut Self> {
+        Ok(self)
+    }
+
+    fn build(&mut self) -> Result<VirtualDevice> {
+        Ok(VirtualDevice::default())
+    }
+}
 
 type ActionFn = Box<dyn Fn(ProcView) -> Result<HandleResult>>;
 
@@ -157,10 +195,7 @@ struct ProcView<'v> {
     event: &'v NiceKeyInputEvent,
     active_layer_id: &'v mut usize,
     output_kb: &'v mut VirtualDevice,
-}
-
-impl<'a> ProcView<'a> {
-    // fn set_active_layer(layer: &mut Layer) {}
+    // emit: &'v dyn FnMut(&[NiceKeyInputEvent]),
 }
 
 impl<'a> Processor<'a> {
@@ -353,4 +388,23 @@ fn main() -> Result<()> {
     proc.run()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // #[test]
+    // fn test_free_key() -> Result<()> {
+    //     let catcher = Catcher::new();
+    //     let mut proc = Processor::new(&mut [], catcher.catch_emit());
+
+    //     let keys = key_ev_seq(&[
+    //         (Key::KEY_A, Press),
+    //         (Key::KEY_A, Repeat),
+    //         (Key::KEY_A, Release),
+    //     ]);
+    //     input_keys(&mut proc, &keys)?;
+
+    //     assert_events_eq(&catcher.events.borrow(), &keys);
+    //     Ok(())
+    // }
 }
