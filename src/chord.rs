@@ -42,7 +42,7 @@ impl ChordHandler {
         }
     }
 
-    fn send_captured_keys(pv: ProcView, chord: &mut ChordHandler) -> Result<()> {
+    fn send_captured_keys(pv: &mut ProcView, chord: &mut ChordHandler) -> Result<()> {
         let mut send_events = vec![];
         // Propagate the keys that are pressed, but were grabbed when building the chord
         for (key, key_state) in chord.key_states.iter() {
@@ -59,7 +59,7 @@ impl ChordHandler {
 }
 
 impl KeyEventHandler for ChordHandler {
-    fn handle_event(&mut self, pv: ProcView) -> Result<crate::HandleResult> {
+    fn handle_event(&mut self, pv: &mut ProcView) -> Result<crate::HandleResult> {
         let mut result = HandleResult::NotHandled; // This only works because InputEvent is Clone. fix
         let event_key = pv.event.key;
         if self.key_states.contains_key(&event_key) {
@@ -69,6 +69,7 @@ impl KeyEventHandler for ChordHandler {
                 KeyEventValue::Press => Some(KeyState::Pressed),
                 KeyEventValue::Release => Some(KeyState::Released),
                 KeyEventValue::Repeat => None,
+                KeyEventValue::QuickRepeat => None,
             };
             if pv.event.value == KeyEventValue::Repeat
                     && self.num_pressed == 1
@@ -151,7 +152,7 @@ impl KeyEventHandler for ChordHandler {
         }
         Ok(result)
     }
-    fn reset(&mut self) {
+    fn reset(&mut self, pv: &mut ProcView) {
         // self.key_states.values_mut().for_each(|v| *v = )
     }
 }
