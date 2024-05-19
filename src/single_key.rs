@@ -1,10 +1,5 @@
 use anyhow::Result;
-use evdev::Key;
-
-use crate::{
-    ActionFn, HandleResult, KeyEventFilter, KeyEventHandler, KeyEventValue, NiceKeyInputEvent,
-    ProcView,
-};
+use crate::{ActionFn, HandleResult, KeyEventHandler, KeyEventValue, ProcView};
 
 pub struct SingleKey {
     // filter: KeyEventFilter,

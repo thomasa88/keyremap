@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chord::ChordHandler;
+use longmod::LongPressModifier;
 use evdev::{AttributeSetRef, Device, EventType, InputEvent, Key};
 use futures::stream::FuturesUnordered;
 use num_traits::FromPrimitive;
@@ -21,6 +22,7 @@ use tracing::event;
 use tracing_subscriber::{filter, layer};
 
 mod chord;
+mod longmod;
 mod qrkey;
 mod single_key;
 
@@ -64,7 +66,7 @@ impl VirtualDeviceBuilder {
     }
 }
 
-type ActionFn = Box<dyn Fn(&mut ProcView) -> Result<HandleResult>>;
+type ActionFn = Box<dyn FnMut(&mut ProcView) -> Result<HandleResult>>;
 
 struct Layer {
     id: usize,
@@ -104,14 +106,14 @@ impl Layer {
         }
     }
 
-    // fn add_handler(&mut self, key: Key, key_handler: impl KeyEventHandler) {
-    //     self.handler_map
-    //         .entry(KeyEventFilter {
-    //             key_code: key.code(),
-    //         })
-    //         .or_default()
-    //         .push(key_handler);
-    // }
+    fn add_handler(&mut self, key: Key, key_handler: impl KeyEventHandler + 'static) {
+        self.handler_map
+            .entry(KeyEventFilter {
+                key_code: key.code(),
+            })
+            .or_default()
+            .push(Rc::new(RefCell::new(key_handler)));
+    }
 }
 
 // #[derive(PartialEq, Eq, Hash)]
@@ -354,7 +356,7 @@ impl<'a> Processor<'a> {
             {
                 quick_repeats.push_back((
                     Key::new(event.code()),
-                    Instant::now() + Duration::from_millis(100),
+                    Instant::now() + Duration::from_millis(200),
                 ));
             }
         }
@@ -373,11 +375,6 @@ impl<'a> Processor<'a> {
 // fn key_event(key: Key, action: KeyEventValue) -> InputEvent {
 //     InputEvent::new(EventType::KEY, key.code(), action as i32)
 // }
-
-async fn asynctest() {
-    tokio::time::sleep(Duration::from_millis(10000)).await;
-    println!("async");
-}
 
 // Tokio spawn() requires arguments to be Sync, even though it is only used on
 // one thread. Using tokio::task::LocalSet instead - to still have sleep.
@@ -398,26 +395,68 @@ async fn main() -> Result<()> {
     let mut nav_layer = Layer::new(NAV_LAYER_ID);
 
     home_layer.add_key_press(
-        Key::KEY_D,
-        Box::new(|p| {
-            if p.event.value == KeyEventValue::QuickRepeat {
-                *p.active_layer_id = NAV_LAYER_ID;
+        Key::KEY_F,
+        Box::new(|pv| {
+            if pv.event.value == KeyEventValue::QuickRepeat {
+                *pv.active_layer_id = NAV_LAYER_ID;
                 println!("Nav layer");
-            } else if p.event.value == KeyEventValue::Release {
+            } else if pv.event.value == KeyEventValue::Release {
                 // Release happenend before layer switch -> cancel layer key
-                p.output_kb.emit(&[
-                    NiceKeyInputEvent::new(Key::KEY_D, KeyEventValue::Press).into(),
-                    NiceKeyInputEvent::new(Key::KEY_D, KeyEventValue::Release).into(),
+                pv.output_kb.emit(&[
+                    NiceKeyInputEvent::new(Key::KEY_F, KeyEventValue::Press).into(),
+                    NiceKeyInputEvent::new(Key::KEY_F, KeyEventValue::Release).into(),
                 ])?;
             }
             Ok(HandleResult::Handled)
         }),
         None,
     );
-    // home_layer.add_handler(
+    // let mut alt_alt = false;
+    // home_layer.add_key_press(
     //     Key::KEY_D,
-    //     QuickRep,
+    //     Box::new(move |pv| {
+    //         if pv.event.value == KeyEventValue::QuickRepeat {
+    //             alt_alt = true;
+    //             pv.output_kb.emit(&[NiceKeyInputEvent::new(
+    //                 Key::KEY_LEFTALT,
+    //                 KeyEventValue::Press,
+    //             )
+    //             .into()])?;
+    //             Ok(HandleResult::Handled)
+    //         } else if alt_alt
+    //             && (pv.event.value == KeyEventValue::Release
+    //                 || pv.event.value == KeyEventValue::Repeat)
+    //         {
+    //             pv.output_kb
+    //                 .emit(&[NiceKeyInputEvent::new(Key::KEY_LEFTALT, pv.event.value).into()])?;
+
+    //             if pv.event.value == KeyEventValue::Release {
+    //                 alt_alt = false;
+    //             }
+
+    //             Ok(HandleResult::Handled)
+    //         } else {
+    //             Ok(HandleResult::NotHandled)
+    //         }
+    //     }),
+    //     None,
     // );
+    home_layer.add_handler(
+        Key::KEY_D,
+        LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT).no_reset(),
+    );
+    home_layer.add_handler(
+        Key::KEY_S,
+        LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
+    );
+    nav_layer.add_handler(
+        Key::KEY_D,
+        LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT).no_reset(),
+    );
+    nav_layer.add_handler(
+        Key::KEY_S,
+        LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
+    );
     home_layer.add_chord(
         &[Key::KEY_U, Key::KEY_I],
         Box::new(|pv| {
@@ -434,13 +473,21 @@ async fn main() -> Result<()> {
 
     nav_layer.silence_unmapped = true;
     nav_layer.add_key_press(
-        Key::KEY_D,
+        Key::KEY_F,
         Box::new(|p| {
             if p.event.value == KeyEventValue::Release {
                 *p.active_layer_id = HOME_LAYER_ID;
                 println!("Home layer");
             }
             // Just silence any press or repeat
+            Ok(HandleResult::Handled)
+        }),
+        None,
+    );
+    nav_layer.add_key_press(
+        Key::KEY_LEFTALT,
+        Box::new(|pv| {
+            pv.output_kb.emit(&[(*pv.event).into()])?;
             Ok(HandleResult::Handled)
         }),
         None,
@@ -507,8 +554,6 @@ async fn main() -> Result<()> {
     let layers = vec![home_layer, nav_layer];
     let proc = Processor::new(input_kb, virt_kb, layers);
 
-    // let local = tokio::task::LocalSet::new();
-    // local.run_until(future)
     proc.run().await?;
 
     Ok(())
