@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{bail, Context, Result};
 use evdev::{InputEvent, InputEventKind, Key};
 use num_traits::FromPrimitive;
+use tracing::event;
 
 use crate::{ActionFn, HandleResult, KeyEventHandler, KeyEventValue, NiceKeyInputEvent, ProcView};
 
@@ -21,6 +22,7 @@ pub struct ChordHandler {
     // chord: Chord<'a>u
     action: ActionFn,
     key_states: BTreeMap<Key, KeyState>,
+    withheld_keys: VecDeque<Key>,
     active_until: Option<std::time::SystemTime>,
     num_pressed: usize,
     exiting: bool,
@@ -34,6 +36,7 @@ impl ChordHandler {
                 .iter()
                 .map(|key| (key.clone(), KeyState::Released))
                 .collect(),
+            withheld_keys: VecDeque::new(),
             active_until: None,
             action: action,
             num_pressed: 0,
@@ -42,14 +45,16 @@ impl ChordHandler {
         }
     }
 
-    fn send_captured_keys(pv: &mut ProcView, chord: &mut ChordHandler) -> Result<()> {
+    fn send_withheld_keys(pv: &mut ProcView, chord: &mut ChordHandler) -> Result<()> {
         let mut send_events = vec![];
         // Propagate the keys that are pressed, but were grabbed when building the chord
-        for (key, key_state) in chord.key_states.iter() {
-            if *key_state == KeyState::Pressed {
+        // for (key, key_state) in chord.key_states.iter() {
+        for key in &chord.withheld_keys {
+            // if *key_state == KeyState::Pressed {
                 send_events.push(NiceKeyInputEvent::new(*key, KeyEventValue::Press).into());
-            }
+            // }
         }
+        chord.withheld_keys.clear();
         // TODO: process_event could return the event if unprocessed. Then it could be passed in as a move.
         let last_event: InputEvent = pv.event.clone().into();
         send_events.push(last_event);
@@ -82,7 +87,7 @@ impl KeyEventHandler for ChordHandler {
                 } else {
                     // Allow a normal repeat of a key if it is the first of the chord
                     // The chord will be broken
-                    ChordHandler::send_captured_keys(pv, self)?;
+                    ChordHandler::send_withheld_keys(pv, self)?;
                     self.exiting = true;
                 }
             } else if let Some(new_state) = new_state_opt {
@@ -115,16 +120,22 @@ impl KeyEventHandler for ChordHandler {
                         chord_result = (self.action)(pv)?;
                         self.silent_exit = true;
                         self.exiting = true;
+                    } else {
+                        self.withheld_keys.push_back(event_key);
                     }
                 } else if new_state == KeyState::Released {
                     // Chord is broken
                     if self.num_pressed > 0 {
                         self.num_pressed -= 1;
 
-                        ChordHandler::send_captured_keys(pv, self)?;
+                        ChordHandler::send_withheld_keys(pv, self)?;
+                        // if let Some(pos) = self.withheld_keys.iter().position(|k| *k == event_key) {
+                        //     self.withheld_keys.remove(pos);
+                        // }
 
                         if self.num_pressed > 0 {
                             // The flushing was not completed in one step - let it continue
+                            // (Wait for the user to release the keys)
                             self.exiting = true;
                         }
                     } else {
@@ -135,7 +146,7 @@ impl KeyEventHandler for ChordHandler {
                     }
                 };
                 // Update with the latest state after any flushing, to not miss the key while flushing
-                // That is, if the key was pressed, the press event should be flushed befor we set the
+                // That is, if the key was pressed, the press event should be flushed before we set the
                 // state to released.
                 *self.key_states.get_mut(&event_key).unwrap() = new_state;
             }
@@ -145,7 +156,7 @@ impl KeyEventHandler for ChordHandler {
 
             if !self.exiting && self.num_pressed > 0 {
                 // Key outside of active chord. Chord is broken!
-                ChordHandler::send_captured_keys(pv, self)?;
+                ChordHandler::send_withheld_keys(pv, self)?;
                 self.exiting = true;
                 result = HandleResult::Handled;
             }
@@ -170,7 +181,7 @@ mod tests {
     use crate::VirtualDevice;
 
     fn panic_on_call() -> ActionFn {
-        Box::new(|_: ProcView<'_>| panic!("Chord executed"))
+        Box::new(|_: &mut ProcView<'_>| panic!("Chord executed"))
     }
 
     fn key_ev_seq(ev_infos: &[(Key, KeyEventValue)]) -> Vec<InputEvent> {
@@ -185,9 +196,9 @@ mod tests {
         seq: &[(Key, KeyEventValue, HandleResult)],
     ) -> Vec<InputEvent> {
         let mut virt_kb = VirtualDevice::default();
-        for (key, value, exp_result) in seq {
+        for (i, (key, value, exp_result)) in seq.iter().enumerate() {
             let result = chord
-                .handle_event(ProcView {
+                .handle_event(&mut ProcView {
                     event: &NiceKeyInputEvent {
                         key: *key,
                         value: *value,
@@ -196,7 +207,12 @@ mod tests {
                     output_kb: &mut virt_kb,
                 })
                 .unwrap();
-            assert_eq!(result, *exp_result);
+            assert_eq!(
+                result,
+                *exp_result,
+                "Mismatching handle result at index {i} (key {})",
+                key.code()
+            );
         }
         virt_kb.log
     }
@@ -615,5 +631,46 @@ mod tests {
     //     Ok(())
     // }
 
-    //     // fn test_flush_in_input_order()
+    #[test]
+    fn test_flush_in_input_order() -> Result<()> {
+        // User's writing will be messed up if the keys are not flushed in the order
+        // in which they were input.
+
+        let mut chord = ChordHandler::new(&[Key::KEY_A, Key::KEY_B, Key::KEY_C], panic_on_call());
+
+        assert_events_eq(
+            handle_seq(
+                &mut chord,
+                &[
+                    (Key::KEY_A, Press, Handled),
+                    (Key::KEY_B, Press, Handled),
+                    (Key::KEY_A, Release, Handled),
+                ],
+            ),
+            key_ev_seq(&[
+                (Key::KEY_A, Press),
+                (Key::KEY_B, Press),
+                (Key::KEY_A, Release),
+            ]),
+        );
+
+        let mut chord = ChordHandler::new(&[Key::KEY_A, Key::KEY_B, Key::KEY_C], panic_on_call());
+
+        assert_events_eq(
+            handle_seq(
+                &mut chord,
+                &[
+                    (Key::KEY_B, Press, Handled),
+                    (Key::KEY_A, Press, Handled),
+                    (Key::KEY_A, Release, Handled),
+                ],
+            ),
+            key_ev_seq(&[
+                (Key::KEY_B, Press),
+                (Key::KEY_A, Press),
+                (Key::KEY_A, Release),
+            ]),
+        );
+        Ok(())
+    }
 }
