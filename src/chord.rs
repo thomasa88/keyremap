@@ -163,9 +163,13 @@ impl KeyEventHandler for ChordHandler {
         }
         Ok(result)
     }
+
     fn reset(&mut self, pv: &mut ProcView) {
         // self.key_states.values_mut().for_each(|v| *v = )
     }
+
+    // fn dyn_eq(&self, other: &Self) {
+    // }
 }
 
 #[cfg(test)]

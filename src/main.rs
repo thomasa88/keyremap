@@ -1,6 +1,6 @@
 use std::{
     cell::{OnceCell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     marker::PhantomData,
     rc::Rc,
@@ -11,19 +11,19 @@ use std::{
 
 use anyhow::{Context, Result};
 use chord::ChordHandler;
-use longmod::LongPressModifier;
-use evdev::{AttributeSetRef, Device, EventType, InputEvent, Key};
+use evdev::{AttributeSetRef, Device, EventStream, EventType, InputEvent, Key};
 use futures::stream::FuturesUnordered;
+use longmod::LongPressModifier;
 use num_traits::FromPrimitive;
 use scopeguard::{defer, guard};
 use single_key::SingleKey;
-use tokio::{select, task::JoinSet, time::Instant};
+use tokio::{pin, select, task::JoinSet, time::Instant};
 use tracing::event;
 use tracing_subscriber::{filter, layer};
+use Iterator;
 
 mod chord;
 mod longmod;
-mod qrkey;
 mod single_key;
 
 #[cfg(not(test))]
@@ -169,12 +169,16 @@ trait KeyEventHandler {
     // fn handle_event(&self, proc: &mut Processor) -> Result<HandleResult>;
     fn handle_event(&mut self, pv: &mut ProcView) -> Result<HandleResult>;
     fn reset(&mut self, pv: &mut ProcView);
+    // fn dyn_eq(&self, other: &Self);
 }
 
 #[derive(Debug, PartialEq)]
 enum HandleResult {
+    #[deprecated]
     Handled,
     NotHandled,
+    Withheld,
+    Consumed,
 }
 
 struct Processor<'a> {
@@ -198,7 +202,7 @@ struct ProcView<'v> {
     output_kb: &'v mut VirtualDevice,
 }
 
-impl<'a> Processor<'a> {
+impl<'p> Processor<'p> {
     fn new(input_kb: Device, output_kb: VirtualDevice, layers: Vec<Layer>) -> Self {
         assert!(layers.len() > 0);
         let first_layer_id = layers[0].id;
@@ -231,70 +235,15 @@ impl<'a> Processor<'a> {
         input_dev.grab()?;
 
         let mut quick_repeats = VecDeque::<(Key, Instant)>::new();
-        // let mut w = None;
-        // let mut futures = JoinSet::new();
-        // let mut futures = FuturesUnordered::new();
-        // futures.push(input_stream.next_event());
-        // let mut next_quick_repeat = None;
+        let mut key_queue = VecDeque::new();
+        // let mut active_handlers = HashSet::new();
+        let mut active_handlers = Vec::new();
         loop {
-            // let next_quick_repeat = quick_repeats.pop_front();
-            // let mut quick_repeat_wait = if let Some((key, time)) = next_quick_repeat {
-            //     Some(async move {
-            //         tokio::time::sleep_until(time).await;
-            //         NiceKeyInputEvent {
-            //             key,
-            //             value: KeyEventValue::QuickRepeat,
-            //         }
-            //         .into()
-            //     })
-            // } else {
-            //     None
-            // };
-
-            // let event = if let Some(ww) = quick_repeat_wait.take() {
-            //     select! {
-            //         val = input_stream.next_event() => val?,
-            //         val = ww => val,
-            //     }
-            // } else {
-            //     select! {
-            //         val = input_stream.next_event() => val?,
-            //     }
-            // };
-
             // FuturesUnordered or some kind of stream might be an alternative to the multible branches
             // with select!.
-            let event = if let Some((key, time)) = quick_repeats.front() {
-                let quick_repeat_wait = async move {
-                    tokio::time::sleep_until(*time).await;
-                    NiceKeyInputEvent {
-                        key: *key,
-                        value: KeyEventValue::QuickRepeat,
-                    }
-                    .into()
-                };
-                select! {
-                    val = input_stream.next_event() => val?,
-                    val = quick_repeat_wait => val,
-                }
-            } else {
-                select! {
-                    val = input_stream.next_event() => val?,
-                }
-            };
-            if event.value() == KeyEventValue::QuickRepeat as i32 {
-                quick_repeats.pop_front();
-            }
-            // if event.is_none() {
-            //     continue;
-            // }
-            // let event = event.unwrap();
-            // tokio::time::timeout(duration, future)
-            // let event = input_stream.next_event().await?;
-            if event.event_type() != EventType::KEY {
-                self.output_kb.emit(&[event])?;
-                continue;
-            }
+            let event =
+                Self::get_next_event(&mut input_stream, &mut quick_repeats, &mut self.output_kb)
+                    .await?;
 
             let active_layer = self
                 .layers
@@ -307,22 +256,47 @@ impl<'a> Processor<'a> {
             };
             let mut handle_result = HandleResult::NotHandled;
             let silence_unmapped = active_layer.silence_unmapped;
-            if let Some(handlers) = &mut active_layer.handler_map.get_mut(&filter) {
-                for handler in &mut **handlers {
+            let mut key_withholds = 0;
+            if let Some(handlers) = active_layer.handler_map.get_mut(&filter) {
+                let nice_event = event.into();
+                for handler in handlers {
                     handle_result = handler.borrow_mut().handle_event(&mut ProcView {
-                        event: &event.into(),
+                        event: &nice_event,
                         active_layer_id: &mut self.active_layer_id,
                         output_kb: &mut self.output_kb,
                     })?;
+                    assert!(
+                        handle_result == HandleResult::Withheld
+                            || nice_event.value != KeyEventValue::Press
+                    );
+                    if handle_result == HandleResult::Withheld {
+                        key_withholds += 1;
+                        if !active_handlers.iter().any(|h| Rc::ptr_eq(h, handler)) {
+                            active_handlers.push(handler.clone());
+                        }
+                    }
+                    if handle_result == HandleResult::Consumed {
+                        // The key made a handler complete
+                        key_withholds = 0;
+                        //////// reset layer or active handlers
+                        //// temp:
+                        layer_switch = true;
+                        key_queue.clear();
+                        active_handlers.clear();
+                        break;
+                    }
                     if self.active_layer_id != old_layer_id {
                         layer_switch = true;
                         break;
                     }
-                    if handle_result == HandleResult::Handled {
-                        // Only allowing one active event per key
-                        // Good or bad?
-                        break;
-                    }
+                    // if handle_result == HandleResult::Handled
+                    //     // Only allowing one active event per key
+                    //     // Good or bad?
+                    //     break;
+                    // }
+                }
+                if key_withholds > 0 {
+                    key_queue.push_back((nice_event, key_withholds));
                 }
                 if layer_switch {
                     // New layer ID already set by callback
@@ -360,6 +334,51 @@ impl<'a> Processor<'a> {
                 ));
             }
         }
+    }
+
+    async fn get_next_event<'a>(
+        input_stream: &'a mut EventStream,
+        quick_repeats: &'a mut VecDeque<(Key, Instant)>,
+        output_kb: &mut VirtualDevice,
+    ) -> Result<InputEvent> {
+        let event = if let Some((key, time)) = quick_repeats.front() {
+            let quick_repeat_wait = async move {
+                tokio::time::sleep_until(*time).await;
+                NiceKeyInputEvent {
+                    key: *key,
+                    value: KeyEventValue::QuickRepeat,
+                }
+                .into()
+            };
+            pin!(quick_repeat_wait);
+            loop {
+                let ev = select! {
+                    val = input_stream.next_event() => val?,
+                    val = &mut quick_repeat_wait => val,
+                };
+                if ev.event_type() == EventType::KEY {
+                    break ev;
+                } else {
+                    output_kb.emit(&[ev])?;
+                }
+            }
+        } else {
+            loop {
+                let ev = select! {
+                    val = input_stream.next_event() => val?,
+                };
+                if ev.event_type() == EventType::KEY {
+                    break ev;
+                } else {
+                    output_kb.emit(&[ev])?;
+                }
+            }
+        };
+        if event.value() == KeyEventValue::QuickRepeat as i32 {
+            quick_repeats.pop_front();
+        }
+
+        return Ok(event);
     }
 
     fn reset_layer(layer: &mut Layer, pv: &mut ProcView) {
