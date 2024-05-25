@@ -2,6 +2,7 @@ mod chord;
 mod longmod;
 mod single_key;
 
+use std::fmt::Debug;
 use std::{
     cell::{OnceCell, Ref, RefCell},
     collections::{HashMap, HashSet, VecDeque},
@@ -176,7 +177,7 @@ struct KeyEventFilter {
     key_code: u16,
 }
 
-trait KeyEventHandler {
+trait KeyEventHandler: std::fmt::Debug {
     // fn handle_event(&self, proc: &mut Processor) -> Result<HandleResult>;
     fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)>;
     // fn reset(&mut self, pv: &mut ProcView);
@@ -343,7 +344,7 @@ impl<'p> Processor<'p> {
                     let new_state = handler.borrow().get_state();
                     ensure!(
                         handler_event == HandlerEvent::NoEvent || new_state != old_state,
-                        "Handler should change state when emitting handler event"
+                        "Handler should change state when emitting handler event. {nice_event:?} -> Handler event: {handler_event:?}, for {handler:?} (old state: {old_state:?})"
                     );
                     if handler_event != HandlerEvent::NoEvent {
                         println!(
@@ -708,12 +709,28 @@ async fn main() -> Result<()> {
     home_layer.add_handler(
         Key::KEY_EJECTCLOSECD,
         ChordHandler::new(
-            &[Key::KEY_U, Key::KEY_I],
+            &[Key::KEY_U, Key::KEY_R],
             Box::new(|pv| {
                 pv.output_kb.emit(
                     &[
                         NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Press),
                         NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Release),
+                    ]
+                    .map(|e| e.into()),
+                )?;
+                Ok(())
+            }),
+        ),
+    );
+    home_layer.add_handler(
+        Key::KEY_EJECTCLOSECD,
+        ChordHandler::new(
+            &[Key::KEY_I, Key::KEY_O],
+            Box::new(|pv| {
+                pv.output_kb.emit(
+                    &[
+                        NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Press),
+                        NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Release),
                     ]
                     .map(|e| e.into()),
                 )?;

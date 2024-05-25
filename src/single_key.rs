@@ -1,8 +1,10 @@
+use std::{any::type_name, fmt::Debug};
+
 use crate::{
     ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, ProcView,
     ResetFn,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use evdev::Key;
 
 pub struct SingleKey {
@@ -10,6 +12,15 @@ pub struct SingleKey {
     action: ActionFn,
     reset: Option<ResetFn>,
     state: HandlerState,
+}
+
+impl Debug for SingleKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("key", &self.key)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SingleKey {
@@ -27,15 +38,26 @@ impl KeyEventHandler for SingleKey {
     fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)> {
         // println!("Check {:?}", self.key);
         if pv.event.key == self.key {
-            let down = pv.event.value != KeyEventValue::Release;
             (self.action)(pv)?;
+
             // TODO: Check that state transitions are not skipped - i.e. handle double Press events etc. (should not happen)
-            if down {
-                self.state = HandlerState::TearingDown;
-                Ok((KeyAction::Discard, HandlerEvent::BuildComplete))
-            } else {
-                self.state = HandlerState::Waiting;
-                Ok((KeyAction::Discard, HandlerEvent::TeardownComplete))
+            use HandlerState::*;
+            match self.state {
+                Waiting => {
+                    self.state = TearingDown;
+                    Ok((KeyAction::Discard, HandlerEvent::BuildComplete))
+                }
+                TearingDown if pv.event.value == KeyEventValue::Release => {
+                    self.state = Waiting;
+                    Ok((KeyAction::Discard, HandlerEvent::TeardownComplete))
+                }
+                TearingDown => {
+                    // Repeat of some kind
+                    Ok((KeyAction::Discard, HandlerEvent::NoEvent))
+                }
+                BuildingUp => {
+                    bail!("Should never get to build state for a single key")
+                }
             }
         } else {
             Ok((KeyAction::PassThrough, HandlerEvent::NoEvent))
@@ -43,16 +65,6 @@ impl KeyEventHandler for SingleKey {
     }
 
     fn reset(&mut self) {
-        // Make sure key (output) is not continued to be seen as pressed down
-        ////// This is assuming that the 'press' was propagated and emitted by the handler!
-        // if self.down {
-        //     pv.output_kb
-        //         .emit(&[NiceKeyInputEvent::new(self.key, KeyEventValue::Release).into()]);
-        // }
-        //self.reset.as_mut().map(|r| r());
-        // if self.reset.is_some() {
-        //     (self.reset.as_mut().unwrap())()?;
-        // }
         self.reset.as_mut().map(|f| f());
         self.state = HandlerState::Waiting;
     }

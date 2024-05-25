@@ -1,3 +1,5 @@
+use std::{any::type_name, fmt::Debug};
+
 use crate::{
     ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
     NiceKeyInputEvent, ProcView,
@@ -10,6 +12,16 @@ pub struct LongPressModifier {
     orig_key: Key,
     new_key: Key,
     resets: bool,
+}
+
+impl Debug for LongPressModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(type_name::<Self>())
+            .field("orig_key", &self.orig_key)
+            .field("new_key", &self.new_key)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LongPressModifier {
@@ -43,11 +55,15 @@ impl KeyEventHandler for LongPressModifier {
                 // Use the new key
                 pv.output_kb
                     .emit(&[NiceKeyInputEvent::new(self.new_key, KeyEventValue::Press).into()])?;
-                self.state = HandlerState::TearingDown;
-                Ok((KeyAction::Discard, HandlerEvent::BuildComplete))
+                if self.state != HandlerState::TearingDown {
+                    self.state = HandlerState::TearingDown;
+                    Ok((KeyAction::Discard, HandlerEvent::BuildComplete))
+                } else {
+                    Ok((KeyAction::Discard, HandlerEvent::NoEvent))
+                }
             }
-            KeyEventValue::Release => {
-                if self.state == HandlerState::TearingDown {
+            KeyEventValue::Release => match self.state {
+                HandlerState::TearingDown => {
                     // New key released
                     pv.output_kb.emit(&[NiceKeyInputEvent::new(
                         self.new_key,
@@ -56,12 +72,17 @@ impl KeyEventHandler for LongPressModifier {
                     .into()])?;
                     self.state = HandlerState::Waiting;
                     Ok((KeyAction::Discard, HandlerEvent::TeardownComplete))
-                } else {
+                }
+                HandlerState::BuildingUp => {
                     // Original key pressed and released (quickly). Flush it out.
                     self.state = HandlerState::Waiting;
                     Ok((KeyAction::PassThrough, HandlerEvent::Aborted))
                 }
-            }
+                HandlerState::Waiting => {
+                    // Original key released without having triggered the long key press modifier
+                    Ok((KeyAction::PassThrough, HandlerEvent::NoEvent))
+                }
+            },
             // Repeat will only happen for the new key. It seems safe to just ignore it.
             KeyEventValue::Repeat => Ok((KeyAction::Discard, HandlerEvent::NoEvent)),
         }
