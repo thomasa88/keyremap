@@ -5,7 +5,7 @@ use evdev::{InputEvent, InputEventKind, Key};
 use num_traits::FromPrimitive;
 use tracing::event;
 
-use crate::{ActionFn, HandleResult, KeyEventHandler, KeyEventValue, NiceKeyInputEvent, ProcView};
+use crate::{ActionFn, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, NiceKeyInputEvent, ProcView};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum KeyState {
@@ -21,6 +21,7 @@ enum KeyState {
 pub struct ChordHandler {
     // chord: Chord<'a>u
     action: ActionFn,
+    state: HandlerState,
     key_states: BTreeMap<Key, KeyState>,
     withheld_keys: VecDeque<Key>,
     active_until: Option<std::time::SystemTime>,
@@ -39,37 +40,38 @@ impl ChordHandler {
             withheld_keys: VecDeque::new(),
             active_until: None,
             action: action,
+            state: HandlerState::Waiting,
             num_pressed: 0,
             exiting: false,
             silent_exit: false,
         }
     }
 
-    fn send_withheld_keys(pv: &mut ProcView, chord: &mut ChordHandler) -> Result<()> {
-        let mut send_events = vec![];
-        // Propagate the keys that are pressed, but were grabbed when building the chord
-        // for (key, key_state) in chord.key_states.iter() {
-        for key in &chord.withheld_keys {
-            // if *key_state == KeyState::Pressed {
-                send_events.push(NiceKeyInputEvent::new(*key, KeyEventValue::Press).into());
-            // }
-        }
-        chord.withheld_keys.clear();
-        // TODO: process_event could return the event if unprocessed. Then it could be passed in as a move.
-        let last_event: InputEvent = pv.event.clone().into();
-        send_events.push(last_event);
-        pv.output_kb.emit(&send_events)?;
-        Ok(())
-    }
+    // fn send_withheld_keys(pv: &mut ProcView, chord: &mut ChordHandler) -> Result<()> {
+    //     let mut send_events = vec![];
+    //     // Propagate the keys that are pressed, but were grabbed when building the chord
+    //     // for (key, key_state) in chord.key_states.iter() {
+    //     for key in &chord.withheld_keys {
+    //         // if *key_state == KeyState::Pressed {
+    //             send_events.push(NiceKeyInputEvent::new(*key, KeyEventValue::Press).into());
+    //         // }
+    //     }
+    //     chord.withheld_keys.clear();
+    //     // TODO: process_event could return the event if unprocessed. Then it could be passed in as a move.
+    //     let last_event: InputEvent = pv.event.clone().into();
+    //     send_events.push(last_event);
+    //     pv.output_kb.emit(&send_events)?;
+    //     Ok(())
+    // }
 }
 
 impl KeyEventHandler for ChordHandler {
-    fn handle_event(&mut self, pv: &mut ProcView) -> Result<crate::HandleResult> {
-        let mut result = HandleResult::NotHandled; // This only works because InputEvent is Clone. fix
+    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, Option<HandlerState>)> {
+        let mut result = KeyAction::PassThrough; // This only works because InputEvent is Clone. fix
         let event_key = pv.event.key;
         if self.key_states.contains_key(&event_key) {
-            let mut chord_result = HandleResult::Handled;
             // Key in chord
+            let mut chord_result = KeyAction::Hold;
             let new_state_opt = match pv.event.value {
                 KeyEventValue::Press => Some(KeyState::Pressed),
                 KeyEventValue::Release => Some(KeyState::Released),
@@ -83,11 +85,12 @@ impl KeyEventHandler for ChordHandler {
                     && *self.key_states.get(&event_key).unwrap() == KeyState::Pressed
             {
                 if self.exiting {
-                    chord_result = HandleResult::NotHandled;
+                    chord_result = KeyAction::PassThrough;
                 } else {
                     // Allow a normal repeat of a key if it is the first of the chord
                     // The chord will be broken
-                    ChordHandler::send_withheld_keys(pv, self)?;
+                    // ChordHandler::send_withheld_keys(pv, self)?;
+                    chord_result = KeyAction::PassThrough;
                     self.exiting = true;
                 }
             } else if let Some(new_state) = new_state_opt {
@@ -110,14 +113,15 @@ impl KeyEventHandler for ChordHandler {
                     }
                     if !silence {
                         // Pass the event through
-                        chord_result = HandleResult::NotHandled;
+                        chord_result = KeyAction::PassThrough;
                     }
                 } else if new_state == KeyState::Pressed {
                     self.num_pressed += 1;
 
                     if self.num_pressed == self.key_states.len() {
                         // Chord completed!
-                        chord_result = (self.action)(pv)?;
+                        chord_result = KeyAction::Discard;
+                        let handle_this_result = (self.action)(pv)?;
                         self.silent_exit = true;
                         self.exiting = true;
                     } else {
@@ -128,7 +132,7 @@ impl KeyEventHandler for ChordHandler {
                     if self.num_pressed > 0 {
                         self.num_pressed -= 1;
 
-                        ChordHandler::send_withheld_keys(pv, self)?;
+                        // ChordHandler::send_withheld_keys(pv, self)?;
                         // if let Some(pos) = self.withheld_keys.iter().position(|k| *k == event_key) {
                         //     self.withheld_keys.remove(pos);
                         // }
@@ -156,16 +160,21 @@ impl KeyEventHandler for ChordHandler {
 
             if !self.exiting && self.num_pressed > 0 {
                 // Key outside of active chord. Chord is broken!
-                ChordHandler::send_withheld_keys(pv, self)?;
+                // ChordHandler::send_withheld_keys(pv, self)?;
                 self.exiting = true;
-                result = HandleResult::Handled;
+                result = KeyAction::PassThrough;
+                new_state = Some(HandlerState::Waiting);
             }
         }
         Ok(result)
     }
 
-    fn reset(&mut self, pv: &mut ProcView) {
+    fn reset(&mut self) {
         // self.key_states.values_mut().for_each(|v| *v = )
+    }
+
+    fn get_state(&self) -> HandlerState {
+        self.state
     }
 
     // fn dyn_eq(&self, other: &Self) {
@@ -180,7 +189,7 @@ mod tests {
     use itertools::Itertools;
 
     use super::*;
-    use crate::HandleResult::*;
+    use crate::HandlerState::*;
     use crate::KeyEventValue::*;
     use crate::VirtualDevice;
 
@@ -197,7 +206,7 @@ mod tests {
 
     fn handle_seq(
         chord: &mut ChordHandler,
-        seq: &[(Key, KeyEventValue, HandleResult)],
+        seq: &[(Key, KeyEventValue, HandlerState)],
     ) -> Vec<InputEvent> {
         let mut virt_kb = VirtualDevice::default();
         for (i, (key, value, exp_result)) in seq.iter().enumerate() {
