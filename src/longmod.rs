@@ -10,22 +10,27 @@ use evdev::Key;
 pub struct LongPressModifier {
     state: HandlerState,
     orig_key: Key,
-    new_key: Key,
+    new_key: Action,
     resets: bool,
+}
+
+pub enum Action {
+    Key(Key),
+    Fn(ActionFn),
 }
 
 impl Debug for LongPressModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(type_name::<Self>())
             .field("orig_key", &self.orig_key)
-            .field("new_key", &self.new_key)
+            // .field("new_key", &self.new_key)
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
 }
 
 impl LongPressModifier {
-    pub fn new(orig_key: Key, new_key: Key) -> Self {
+    pub fn new(orig_key: Key, new_key: Action) -> Self {
         Self {
             state: HandlerState::Waiting,
             orig_key,
@@ -53,8 +58,13 @@ impl KeyEventHandler for LongPressModifier {
             }
             KeyEventValue::QuickRepeat => {
                 // Use the new key
-                pv.output_kb
-                    .emit(&[NiceKeyInputEvent::new(self.new_key, KeyEventValue::Press).into()])?;
+                match &mut self.new_key {
+                    Action::Key(key) => {
+                        pv.output_kb
+                            .emit(&[NiceKeyInputEvent::new(*key, KeyEventValue::Press).into()])?
+                    }
+                    Action::Fn(f) => (f)(pv)?,
+                }
                 if self.state != HandlerState::TearingDown {
                     self.state = HandlerState::TearingDown;
                     Ok((KeyAction::Discard, HandlerEvent::BuildComplete))
@@ -65,11 +75,14 @@ impl KeyEventHandler for LongPressModifier {
             KeyEventValue::Release => match self.state {
                 HandlerState::TearingDown => {
                     // New key released
-                    pv.output_kb.emit(&[NiceKeyInputEvent::new(
-                        self.new_key,
-                        KeyEventValue::Release,
-                    )
-                    .into()])?;
+                    match &mut self.new_key {
+                        Action::Key(key) => pv.output_kb.emit(&[NiceKeyInputEvent::new(
+                            *key,
+                            KeyEventValue::Release,
+                        )
+                        .into()])?,
+                        Action::Fn(f) => (f)(pv)?,
+                    }
                     self.state = HandlerState::Waiting;
                     Ok((KeyAction::Discard, HandlerEvent::TeardownComplete))
                 }

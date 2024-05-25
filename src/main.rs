@@ -110,11 +110,9 @@ impl Layer {
     //     }
     // }
 
-    fn add_handler(&mut self, key: Key, key_handler: impl KeyEventHandler + 'static) {
+    fn add_handler(&mut self, key_handler: impl KeyEventHandler + 'static) {
         self.handler_map
-            .entry(KeyEventFilter {
-                key_code: key.code(),
-            })
+            .entry(KeyEventFilter { key_code: 0 })
             .or_default()
             .push(Rc::new(RefCell::new(key_handler)));
     }
@@ -321,12 +319,12 @@ impl<'p> Processor<'p> {
             // let mut to_inactive = Vec::new();
             // Active handlers get the first opportunity. Optimize!
             ////  improve: false is lower than true, so inverting the result...
+            ////             Only need to do this if any handler had an event
             handlers.sort_by_key(|h| !is_active(h.borrow().get_state()));
             // for (handler, handler_active) in active_handlers
             //     .iter()
             //     .map(|h: &HandlerRc| (h, true))
             //     .chain(inactive_handlers.iter().map(|h: &HandlerRc| (h, false)))
-            println!("loop");
             for handler in &handlers {
                 // if let Some(layer_handlers) = active_layer.handler_map.get_mut(&filter) {
                 ////////// This should not iterate over the handlers in active_handlers!!!
@@ -406,21 +404,22 @@ impl<'p> Processor<'p> {
                         break;
                     }
                 }
+            }
 
-                if layer_switch {
-                    // // New layer ID already set by callback
-                    // Self::reset_layer(
-                    //     self.layers
-                    //         .get_mut(old_layer_id)
-                    //         .context("Invalid layer id: ")?,
-                    //     &mut ProcView {
-                    //         event: &event.into(),
-                    //         active_layer_id: &mut self.active_layer_id,
-                    //         output_kb: &mut self.output_kb,
-                    //     },
-                    // );
-                    // dbg!(self.active_layer_id);
-                }
+            if layer_switch {
+                // New layer ID already set by callback
+                // Self::reset_layer(
+                //     self.layers
+                //         .get_mut(old_layer_id)
+                //         .context("Invalid layer id: ")?,
+                //     &mut ProcView {
+                //         event: &event.into(),
+                //         active_layer_id: &mut self.active_layer_id,
+                //         output_kb: &mut self.output_kb,
+                //     },
+                // );
+                behåll aktiva handlers. byt ut inaktiva
+                dbg!(self.active_layer_id);
             }
 
             if nice_event.is_real() {
@@ -429,7 +428,6 @@ impl<'p> Processor<'p> {
                 }
                 // if event_result == HandlerState::Waiting && !silence_unmapped && nice_event.is_real()
                 else if final_key_action == KeyAction::PassThrough {
-                    println!("PASS");
                     self.output_kb.emit(&[event])?;
                 }
             }
@@ -631,39 +629,23 @@ async fn main() -> Result<()> {
     let mut home_layer = Layer::new(HOME_LAYER_ID);
     let mut nav_layer = Layer::new(NAV_LAYER_ID);
 
-    home_layer.add_handler(
-        Key::KEY_EJECTCLOSECD,
-        SingleKey::new(
-            Key::KEY_H,
-            Box::new(|pv| {
-                // println!("H {:?}", &pv.event);
-                //// TODO: Emit function that filters out non-real events and also logs a warning
-                if pv.event.is_real() {
-                    pv.output_kb
-                        .emit(&[NiceKeyInputEvent::new(Key::KEY_0, pv.event.value).into()])?;
-                }
-                Ok(())
-            }),
-            None,
-        ),
-    );
-    // home_layer.add_handler(
-    //     Key::KEY_EJECTCLOSECD,
-    //     SingleKey::new(
-    //         Key::KEY_J,
-    //         Box::new(|pv| {
-    //             // println!("J {:?}", &pv.event);
-    //             pv.output_kb
-    //                 .emit(&[NiceKeyInputEvent::new(Key::KEY_1, pv.event.value).into()])?;
-    //             Ok(())
-    //         }),
-    //         None,
-    //     ),
-    // );
-    home_layer.add_handler(
-        Key::KEY_EJECTCLOSECD,
-        LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT),
-    );
+    home_layer.add_handler(SingleKey::new(
+        Key::KEY_H,
+        Box::new(|pv| {
+            // println!("H {:?}", &pv.event);
+            //// TODO: Emit function that filters out non-real events and also logs a warning
+            if pv.event.is_real() {
+                pv.output_kb
+                    .emit(&[NiceKeyInputEvent::new(Key::KEY_0, pv.event.value).into()])?;
+            }
+            Ok(())
+        }),
+        None,
+    ));
+    home_layer.add_handler(LongPressModifier::new(
+        Key::KEY_D,
+        longmod::Action::Key(Key::KEY_LEFTALT),
+    ));
 
     // home_layer.add_key_press(
     //     Key::KEY_H,
@@ -673,23 +655,24 @@ async fn main() -> Result<()> {
     //     }),
     //     None,
     // );
-    // home_layer.add_key_press(
-    //     Key::KEY_F,
-    //     Box::new(|pv| {
-    //         if pv.event.value == KeyEventValue::QuickRepeat {
-    //             *pv.active_layer_id = NAV_LAYER_ID;
-    //             println!("Nav layer");
-    //         } else if pv.event.value == KeyEventValue::Release {
-    //             // Release happenend before layer switch -> cancel layer key
-    //             pv.output_kb.emit(&[
-    //                 NiceKeyInputEvent::new(Key::KEY_F, KeyEventValue::Press).into(),
-    //                 NiceKeyInputEvent::new(Key::KEY_F, KeyEventValue::Release).into(),
-    //             ])?;
-    //         }
-    //         Ok(HandleResult::Handled)
-    //     }),
-    //     None,
-    // );
+    home_layer.add_handler(LongPressModifier::new(
+        Key::KEY_F,
+        longmod::Action::Fn(Box::new(|pv| {
+            if pv.event.value == KeyEventValue::QuickRepeat {
+                *pv.active_layer_id = NAV_LAYER_ID;
+                println!("Nav layer");
+            } else if pv.event.value == KeyEventValue::Release {
+                // Release happenend before layer switch -> cancel layer key
+                // pv.output_kb.emit(&[
+                //     NiceKeyInputEvent::new(Key::KEY_F, KeyEventValue::Press).into(),
+                //     NiceKeyInputEvent::new(Key::KEY_F, KeyEventValue::Release).into(),
+                // ])?;
+                *pv.active_layer_id = HOME_LAYER_ID;
+                println!("Home layer");
+            }
+            Ok(())
+        })),
+    ));
     // home_layer.add_handler(
     //     Key::KEY_D,
     //     LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT).no_reset(),
@@ -706,38 +689,32 @@ async fn main() -> Result<()> {
     //     Key::KEY_S,
     //     LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
     // );
-    home_layer.add_handler(
-        Key::KEY_EJECTCLOSECD,
-        ChordHandler::new(
-            &[Key::KEY_U, Key::KEY_R],
-            Box::new(|pv| {
-                pv.output_kb.emit(
-                    &[
-                        NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Press),
-                        NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Release),
-                    ]
-                    .map(|e| e.into()),
-                )?;
-                Ok(())
-            }),
-        ),
-    );
-    home_layer.add_handler(
-        Key::KEY_EJECTCLOSECD,
-        ChordHandler::new(
-            &[Key::KEY_I, Key::KEY_O],
-            Box::new(|pv| {
-                pv.output_kb.emit(
-                    &[
-                        NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Press),
-                        NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Release),
-                    ]
-                    .map(|e| e.into()),
-                )?;
-                Ok(())
-            }),
-        ),
-    );
+    home_layer.add_handler(ChordHandler::new(
+        &[Key::KEY_U, Key::KEY_R],
+        Box::new(|pv| {
+            pv.output_kb.emit(
+                &[
+                    NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Press),
+                    NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Release),
+                ]
+                .map(|e| e.into()),
+            )?;
+            Ok(())
+        }),
+    ));
+    home_layer.add_handler(ChordHandler::new(
+        &[Key::KEY_I, Key::KEY_O],
+        Box::new(|pv| {
+            pv.output_kb.emit(
+                &[
+                    NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Press),
+                    NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Release),
+                ]
+                .map(|e| e.into()),
+            )?;
+            Ok(())
+        }),
+    ));
 
     // nav_layer.silence_unmapped = true;
     // nav_layer.add_key_press(
@@ -760,64 +737,50 @@ async fn main() -> Result<()> {
     //     }),
     //     None,
     // );
-    // nav_layer.add_key_press(
-    //     Key::KEY_I,
-    //     Box::new(|pv| {
-    //         pv.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_UP, pv.event.value).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     }),
-    //     Some(Box::new(|pv| {
-    //         // This is needed to make sure the key is released when the layer is switched.
-    //         // Otherwise the remapped key will be continue to be pressed.
-    //         ////// only emit this if the key is currently pressed - need to save state
-    //         pv.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Release).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     })),
-    // );
-    // nav_layer.add_key_press(
-    //     Key::KEY_K,
-    //     Box::new(|p| {
-    //         p.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_DOWN, p.event.value).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     }),
-    //     Some(Box::new(|pv| {
-    //         ////// only emit this if the key is currently pressed - need to save state
-    //         pv.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_DOWN, KeyEventValue::Release).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     })),
-    // );
-    // nav_layer.add_key_press(
-    //     Key::KEY_J,
-    //     Box::new(|p| {
-    //         p.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_LEFT, p.event.value).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     }),
-    //     Some(Box::new(|pv| {
-    //         ////// only emit this if the key is currently pressed - need to save state
-    //         pv.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_LEFT, KeyEventValue::Release).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     })),
-    // );
-    // nav_layer.add_key_press(
-    //     Key::KEY_L,
-    //     Box::new(|p| {
-    //         p.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_RIGHT, p.event.value).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     }),
-    //     Some(Box::new(|pv| {
-    //         ////// only emit this if the key is currently pressed - need to save state
-    //         pv.output_kb
-    //             .emit(&[NiceKeyInputEvent::new(Key::KEY_RIGHT, KeyEventValue::Release).into()])?;
-    //         Ok(HandlerState::Handled)
-    //     })),
-    // );
+    nav_layer.add_handler(SingleKey::new(
+        Key::KEY_I,
+        Box::new(|pv| {
+            pv.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_UP, pv.event.value).into()])?;
+            Ok(())
+        }),
+        // Some(Box::new(|pv| {
+        //     // This is needed to make sure the key is released when the layer is switched.
+        //     // Otherwise the remapped key will be continue to be pressed.
+        //     ////// only emit this if the key is currently pressed - need to save state
+        //     pv.output_kb
+        //         .emit(&[NiceKeyInputEvent::new(Key::KEY_UP, KeyEventValue::Release).into()])?;
+        //     Ok(())
+        // }
+        None,
+    ));
+    nav_layer.add_handler(SingleKey::new(
+        Key::KEY_K,
+        Box::new(|p| {
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_DOWN, p.event.value).into()])?;
+            Ok(())
+        }),
+        None,
+    ));
+    nav_layer.add_handler(SingleKey::new(
+        Key::KEY_J,
+        Box::new(|p| {
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_LEFT, p.event.value).into()])?;
+            Ok(())
+        }),
+        None,
+    ));
+    nav_layer.add_handler(SingleKey::new(
+        Key::KEY_L,
+        Box::new(|p| {
+            p.output_kb
+                .emit(&[NiceKeyInputEvent::new(Key::KEY_RIGHT, p.event.value).into()])?;
+            Ok(())
+        }),
+        None,
+    ));
 
     let layers = vec![home_layer, nav_layer];
     let proc = Processor::new(input_kb, virt_kb, layers);
