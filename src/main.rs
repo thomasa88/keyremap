@@ -1,4 +1,4 @@
-// mod chord;
+mod chord;
 mod longmod;
 mod single_key;
 
@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{ensure, Context, Result};
-// use chord::ChordHandler;
+use chord::ChordHandler;
 use evdev::{AttributeSetRef, Device, EventStream, EventType, InputEvent, Key};
 use futures::stream::FuturesUnordered;
 use longmod::LongPressModifier;
@@ -325,25 +325,32 @@ impl<'p> Processor<'p> {
             //     .iter()
             //     .map(|h: &HandlerRc| (h, true))
             //     .chain(inactive_handlers.iter().map(|h: &HandlerRc| (h, false)))
+            println!("loop");
             for handler in &handlers {
-                println!("loop");
                 // if let Some(layer_handlers) = active_layer.handler_map.get_mut(&filter) {
                 ////////// This should not iterate over the handlers in active_handlers!!!
                 // for handler in layer_handlers
                 //     .iter()e
                 //     .filter(|h| !active_handlers.iter().any(|ah| Rc::ptr_eq(h, ah)))
                 {
-                    // let old_state = handler.borrow().get_state();
+                    let old_state = handler.borrow().get_state();
                     let (key_action, handler_event) =
                         handler.borrow_mut().handle_event(&mut ProcView {
                             event: &nice_event,
                             active_layer_id: &mut self.active_layer_id,
                             output_kb: &mut self.output_kb,
                         })?;
-                    println!(
-                        "{:?} {:?} {:?} {:?} ",
-                        nice_event.key, nice_event.value, key_action, handler_event
+                    let new_state = handler.borrow().get_state();
+                    ensure!(
+                        handler_event == HandlerEvent::NoEvent || new_state != old_state,
+                        "Handler should change state when emitting handler event"
                     );
+                    if handler_event != HandlerEvent::NoEvent {
+                        println!(
+                            "{:?} {:?} {:?} {:?} ",
+                            nice_event.key, nice_event.value, key_action, handler_event
+                        );
+                    }
 
                     ensure!(
                         !(handler.borrow().get_state() == HandlerState::TearingDown
@@ -698,19 +705,22 @@ async fn main() -> Result<()> {
     //     Key::KEY_S,
     //     LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
     // );
-    // home_layer.add_chord(
-    //     &[Key::KEY_U, Key::KEY_I],
-    //     Box::new(|pv| {
-    //         pv.output_kb.emit(
-    //             &[
-    //                 NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Press),
-    //                 NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Release),
-    //             ]
-    //             .map(|e| e.into()),
-    //         )?;
-    //         Ok(HandlerState::Handled)
-    //     }),
-    // );
+    home_layer.add_handler(
+        Key::KEY_EJECTCLOSECD,
+        ChordHandler::new(
+            &[Key::KEY_U, Key::KEY_I],
+            Box::new(|pv| {
+                pv.output_kb.emit(
+                    &[
+                        NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Press),
+                        NiceKeyInputEvent::new(Key::KEY_SPACE, KeyEventValue::Release),
+                    ]
+                    .map(|e| e.into()),
+                )?;
+                Ok(())
+            }),
+        ),
+    );
 
     // nav_layer.silence_unmapped = true;
     // nav_layer.add_key_press(

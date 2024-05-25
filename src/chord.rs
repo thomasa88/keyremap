@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
-use anyhow::{bail, Context, Result};
-use evdev::{InputEvent, InputEventKind, Key};
-use num_traits::FromPrimitive;
-use tracing::event;
+use anyhow::{ensure, Result};
+use evdev::Key;
 
-use crate::{ActionFn, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, NiceKeyInputEvent, ProcView};
+use crate::{
+    ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, ProcView,
+};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum KeyState {
@@ -23,11 +23,7 @@ pub struct ChordHandler {
     action: ActionFn,
     state: HandlerState,
     key_states: BTreeMap<Key, KeyState>,
-    withheld_keys: VecDeque<Key>,
-    active_until: Option<std::time::SystemTime>,
     num_pressed: usize,
-    exiting: bool,
-    silent_exit: bool,
 }
 
 impl ChordHandler {
@@ -37,148 +33,138 @@ impl ChordHandler {
                 .iter()
                 .map(|key| (key.clone(), KeyState::Released))
                 .collect(),
-            withheld_keys: VecDeque::new(),
-            active_until: None,
             action: action,
             state: HandlerState::Waiting,
             num_pressed: 0,
-            exiting: false,
-            silent_exit: false,
         }
     }
-
-    // fn send_withheld_keys(pv: &mut ProcView, chord: &mut ChordHandler) -> Result<()> {
-    //     let mut send_events = vec![];
-    //     // Propagate the keys that are pressed, but were grabbed when building the chord
-    //     // for (key, key_state) in chord.key_states.iter() {
-    //     for key in &chord.withheld_keys {
-    //         // if *key_state == KeyState::Pressed {
-    //             send_events.push(NiceKeyInputEvent::new(*key, KeyEventValue::Press).into());
-    //         // }
-    //     }
-    //     chord.withheld_keys.clear();
-    //     // TODO: process_event could return the event if unprocessed. Then it could be passed in as a move.
-    //     let last_event: InputEvent = pv.event.clone().into();
-    //     send_events.push(last_event);
-    //     pv.output_kb.emit(&send_events)?;
-    //     Ok(())
-    // }
 }
 
 impl KeyEventHandler for ChordHandler {
-    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, Option<HandlerState>)> {
-        let mut result = KeyAction::PassThrough; // This only works because InputEvent is Clone. fix
+    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)> {
+        let mut key_action;
+        let mut handler_event = HandlerEvent::NoEvent;
         let event_key = pv.event.key;
+
         if self.key_states.contains_key(&event_key) {
             // Key in chord
-            let mut chord_result = KeyAction::Hold;
-            let new_state_opt = match pv.event.value {
+            
+            let mut new_key_state_opt = match pv.event.value {
                 KeyEventValue::Press => Some(KeyState::Pressed),
                 KeyEventValue::Release => Some(KeyState::Released),
-                KeyEventValue::Repeat => None,
-                KeyEventValue::QuickRepeat => None,
+                KeyEventValue::Repeat | KeyEventValue::QuickRepeat => None,
             };
-            if pv.event.value == KeyEventValue::Repeat
-                    && self.num_pressed == 1
-                    // Should not really need to check that the key is pressed,
-                    // as repeat implies pressed
-                    && *self.key_states.get(&event_key).unwrap() == KeyState::Pressed
-            {
-                if self.exiting {
-                    chord_result = KeyAction::PassThrough;
-                } else {
-                    // Allow a normal repeat of a key if it is the first of the chord
-                    // The chord will be broken
-                    // ChordHandler::send_withheld_keys(pv, self)?;
-                    chord_result = KeyAction::PassThrough;
-                    self.exiting = true;
+
+            match self.state {
+                HandlerState::Waiting => {
+                    key_action = KeyAction::PassThrough;
+
+                    if pv.event.value == KeyEventValue::Press {
+                        self.num_pressed += 1;
+                        key_action = KeyAction::Hold;
+                        handler_event = HandlerEvent::BuildingStarted;
+                        self.state = HandlerState::BuildingUp;
+                    };
                 }
-            } else if let Some(new_state) = new_state_opt {
-                if self.exiting {
-                    assert_ne!(self.num_pressed, 0);
+                HandlerState::BuildingUp => {
+                    key_action = KeyAction::Hold;
+                    ensure!(
+                        self.num_pressed > 0,
+                        "At least one key should be pressed in building-up state"
+                    );
+
+                    if pv.event.value == KeyEventValue::QuickRepeat && self.num_pressed == 1 {
+                        // Allow a normal repeat of a key if it is the first of the chord
+                        // The chord will be broken
+
+                        // Should not really need to check that the key is pressed,
+                        // as repeat implies pressed
+                        ensure!(*self.key_states.get(&event_key).unwrap() == KeyState::Pressed);
+
+                        //////// clean up
+                        new_key_state_opt = Some(KeyState::Released);
+                        self.reset();
+
+                        key_action = KeyAction::PassThrough;
+                        handler_event = HandlerEvent::Aborted;
+                        self.state = HandlerState::Waiting;
+                    } else if pv.event.value == KeyEventValue::Press {
+                        self.num_pressed += 1;
+
+                        if self.num_pressed == self.key_states.len() {
+                            // Chord completed!
+                            key_action = KeyAction::Discard;
+                            handler_event = HandlerEvent::BuildComplete;
+                            self.state = HandlerState::TearingDown;
+                            (self.action)(pv)?;
+                        }
+                    } else if pv.event.value == KeyEventValue::Release {
+                        // Chord is broken
+                        self.num_pressed -= 1;
+
+                        //////// clean up
+                        new_key_state_opt = Some(KeyState::Released);
+                        self.reset();
+
+                        key_action = KeyAction::PassThrough;
+                        handler_event = HandlerEvent::Aborted;
+                        self.state = HandlerState::Waiting;
+                    }
+                }
+                HandlerState::TearingDown => {
+                    key_action = KeyAction::Discard;
+                    ensure!(
+                        self.num_pressed > 0,
+                        "At least one key should be pressed in tear-down state"
+                    );
                     // When releasing a chord, we should still silent the key events
-                    let silence = self.silent_exit;
-                    if new_state == KeyState::Released {
+                    if pv.event.value == KeyEventValue::Release {
                         self.num_pressed -= 1;
                         if self.num_pressed == 0 {
-                            self.exiting = false;
-                            self.silent_exit = false;
+                            handler_event = HandlerEvent::TeardownComplete;
+                            self.state = HandlerState::Waiting;
                         }
-                    } else if new_state == KeyState::Pressed {
+                    } else if pv.event.value == KeyEventValue::Press {
                         // Must count this even when releasing the chord,
                         // as we do num_pressed -=1 in the other branch.
                         // Alternative: Ignore pressed event and only decrement
                         // if the old state is released.
                         self.num_pressed += 1;
                     }
-                    if !silence {
-                        // Pass the event through
-                        chord_result = KeyAction::PassThrough;
-                    }
-                } else if new_state == KeyState::Pressed {
-                    self.num_pressed += 1;
-
-                    if self.num_pressed == self.key_states.len() {
-                        // Chord completed!
-                        chord_result = KeyAction::Discard;
-                        let handle_this_result = (self.action)(pv)?;
-                        self.silent_exit = true;
-                        self.exiting = true;
-                    } else {
-                        self.withheld_keys.push_back(event_key);
-                    }
-                } else if new_state == KeyState::Released {
-                    // Chord is broken
-                    if self.num_pressed > 0 {
-                        self.num_pressed -= 1;
-
-                        // ChordHandler::send_withheld_keys(pv, self)?;
-                        // if let Some(pos) = self.withheld_keys.iter().position(|k| *k == event_key) {
-                        //     self.withheld_keys.remove(pos);
-                        // }
-
-                        if self.num_pressed > 0 {
-                            // The flushing was not completed in one step - let it continue
-                            // (Wait for the user to release the keys)
-                            self.exiting = true;
-                        }
-                    } else {
-                        bail!(
-                            "Tried to decrement number of pressed keys below 0! Key event: {:?}",
-                            pv.event
-                        )
-                    }
-                };
-                // Update with the latest state after any flushing, to not miss the key while flushing
-                // That is, if the key was pressed, the press event should be flushed before we set the
-                // state to released.
-                *self.key_states.get_mut(&event_key).unwrap() = new_state;
+                }
             }
-            result = chord_result;
+
+            // Update with the latest state after processing with the old state
+            if let Some(new_key_state) = new_key_state_opt {
+                *self.key_states.get_mut(&event_key).unwrap() = new_key_state;
+            }
         } else {
             // Key not in chord
-
-            if !self.exiting && self.num_pressed > 0 {
+            key_action = KeyAction::PassThrough;
+            if self.state == HandlerState::BuildingUp {
                 // Key outside of active chord. Chord is broken!
-                // ChordHandler::send_withheld_keys(pv, self)?;
-                self.exiting = true;
-                result = KeyAction::PassThrough;
-                new_state = Some(HandlerState::Waiting);
+
+                //////// clean up
+                self.reset();
+
+                handler_event = HandlerEvent::Aborted;
+                self.state = HandlerState::Waiting;
             }
         }
-        Ok(result)
+        Ok((key_action, handler_event))
     }
 
     fn reset(&mut self) {
-        // self.key_states.values_mut().for_each(|v| *v = )
+        self.key_states
+            .values_mut()
+            .for_each(|v| *v = KeyState::Released);
+        self.num_pressed = 0;
+        self.state = HandlerState::Waiting;
     }
 
     fn get_state(&self) -> HandlerState {
         self.state
     }
-
-    // fn dyn_eq(&self, other: &Self) {
-    // }
 }
 
 #[cfg(test)]
