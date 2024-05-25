@@ -1,5 +1,6 @@
 use crate::{
-    ActionFn, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, NiceKeyInputEvent, ProcView,
+    ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
+    NiceKeyInputEvent, ProcView,
 };
 use anyhow::Result;
 use evdev::Key;
@@ -28,22 +29,22 @@ impl LongPressModifier {
 }
 
 impl KeyEventHandler for LongPressModifier {
-    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, Option<HandlerState>)> {
+    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)> {
         if pv.event.key != self.orig_key {
-            return Ok((KeyAction::PassThrough, None));
+            return Ok((KeyAction::PassThrough, HandlerEvent::NoEvent));
         }
         match pv.event.value {
             KeyEventValue::Press => {
                 self.state = HandlerState::BuildingUp;
                 // Silence the original key until we know if it should be output
-                Ok((KeyAction::Hold, Some(self.state)))
+                Ok((KeyAction::Hold, HandlerEvent::BuildingStarted))
             }
             KeyEventValue::QuickRepeat => {
                 // Use the new key
                 pv.output_kb
                     .emit(&[NiceKeyInputEvent::new(self.new_key, KeyEventValue::Press).into()])?;
                 self.state = HandlerState::TearingDown;
-                Ok((KeyAction::Discard, Some(self.state)))
+                Ok((KeyAction::Discard, HandlerEvent::BuildComplete))
             }
             KeyEventValue::Release => {
                 if self.state == HandlerState::TearingDown {
@@ -54,15 +55,15 @@ impl KeyEventHandler for LongPressModifier {
                     )
                     .into()])?;
                     self.state = HandlerState::Waiting;
-                    Ok((KeyAction::Discard, Some(self.state)))
+                    Ok((KeyAction::Discard, HandlerEvent::TeardownComplete))
                 } else {
                     // Original key pressed and released (quickly). Flush it out.
                     self.state = HandlerState::Waiting;
-                    Ok((KeyAction::PassThrough, Some(self.state)))
+                    Ok((KeyAction::PassThrough, HandlerEvent::Aborted))
                 }
             }
             // Repeat will only happen for the new key. It seems safe to just ignore it.
-            KeyEventValue::Repeat => Ok((KeyAction::Discard, None)),
+            KeyEventValue::Repeat => Ok((KeyAction::Discard, HandlerEvent::NoEvent)),
         }
     }
 

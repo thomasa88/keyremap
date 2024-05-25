@@ -1,4 +1,7 @@
-use crate::{ActionFn, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, ProcView, ResetFn};
+use crate::{
+    ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, ProcView,
+    ResetFn,
+};
 use anyhow::Result;
 use evdev::Key;
 
@@ -21,7 +24,7 @@ impl SingleKey {
 }
 
 impl KeyEventHandler for SingleKey {
-    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, Option<HandlerState>)> {
+    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)> {
         // println!("Check {:?}", self.key);
         if pv.event.key == self.key {
             let down = pv.event.value != KeyEventValue::Release;
@@ -29,12 +32,14 @@ impl KeyEventHandler for SingleKey {
             // TODO: Check that state transitions are not skipped - i.e. handle double Press events etc. (should not happen)
             if down {
                 self.state = HandlerState::TearingDown;
+                Ok((KeyAction::Discard, HandlerEvent::BuildComplete))
             } else {
                 self.state = HandlerState::Waiting;
+                Ok((KeyAction::Discard, HandlerEvent::TeardownComplete))
             }
-            return Ok((KeyAction::Discard, Some(self.state)));
+        } else {
+            Ok((KeyAction::PassThrough, HandlerEvent::NoEvent))
         }
-        Ok((KeyAction::PassThrough, None))
     }
 
     fn reset(&mut self) {

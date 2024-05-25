@@ -14,7 +14,7 @@ use std::{
     vec,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 // use chord::ChordHandler;
 use evdev::{AttributeSetRef, Device, EventStream, EventType, InputEvent, Key};
 use futures::stream::FuturesUnordered;
@@ -178,7 +178,7 @@ struct KeyEventFilter {
 
 trait KeyEventHandler {
     // fn handle_event(&self, proc: &mut Processor) -> Result<HandleResult>;
-    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, Option<HandlerState>)>;
+    fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)>;
     // fn reset(&mut self, pv: &mut ProcView);
     fn reset(&mut self);
     // fn dyn_eq(&self, other: &Self);
@@ -197,6 +197,15 @@ enum HandlerState {
     BuildingUp,
     //Fulfilled, /// This is not a state
     TearingDown,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum HandlerEvent {
+    Aborted,
+    BuildingStarted,
+    BuildComplete,
+    TeardownComplete,
+    NoEvent,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -325,7 +334,7 @@ impl<'p> Processor<'p> {
                 //     .filter(|h| !active_handlers.iter().any(|ah| Rc::ptr_eq(h, ah)))
                 {
                     // let old_state = handler.borrow().get_state();
-                    let (key_action, new_state_opt) =
+                    let (key_action, handler_event) =
                         handler.borrow_mut().handle_event(&mut ProcView {
                             event: &nice_event,
                             active_layer_id: &mut self.active_layer_id,
@@ -333,19 +342,21 @@ impl<'p> Processor<'p> {
                         })?;
                     println!(
                         "{:?} {:?} {:?} {:?} ",
-                        nice_event.key, nice_event.value, key_action, new_state_opt
+                        nice_event.key, nice_event.value, key_action, handler_event
                     );
+
+                    ensure!(
+                        !(handler.borrow().get_state() == HandlerState::TearingDown
+                            && key_action == KeyAction::Hold),
+                        "Cannot hold keys while tearing down"
+                    );
+
                     final_key_action = std::cmp::max(key_action, final_key_action);
 
-                    match new_state_opt {
-                        Some(HandlerState::BuildingUp) => {
-                            // if !active_handlers.iter().any(|h| Rc::ptr_eq(h, handler)) {
-                            // if !handler_active {
-                            //     to_active.push(handler);
-                            // }
-                            // *handler_active = true;
-                        }
-                        Some(HandlerState::Waiting) => {
+                    match handler_event {
+                        HandlerEvent::BuildingStarted => {}
+                        HandlerEvent::TeardownComplete => {}
+                        HandlerEvent::Aborted => {
                             // if handler_active {
                             //     to_inactive.push(handler);
                             // }
@@ -357,7 +368,7 @@ impl<'p> Processor<'p> {
                                 &mut self.output_kb,
                             )?;
                         }
-                        Some(HandlerState::TearingDown) => {
+                        HandlerEvent::BuildComplete => {
                             // if !handler_active {
                             //     to_active.push(handler);
                             // }
@@ -371,7 +382,7 @@ impl<'p> Processor<'p> {
                                 &mut self.output_kb,
                             )?;
                         }
-                        None => (),
+                        HandlerEvent::NoEvent => (),
                     }
 
                     if self.active_layer_id != old_layer_id {
@@ -562,7 +573,8 @@ impl<'p> Processor<'p> {
         //     }
         // });
 
-        ///// only reset for the keys for which the handler was holding?
+        ///// TODO: only reset for the keys for which the handler was holding?
+        /////       Resetting and flushing for unrelated handlers will not work for layer keys
         for h in handlers {
             if Rc::ptr_eq(&h, handler) {
             } else {
@@ -570,9 +582,16 @@ impl<'p> Processor<'p> {
             }
         }
 
+        // Flush events that was not held by `handler`
         let flush_events: Vec<_> = key_queue
             .into_iter()
-            .map(|(ev, _hs)| (*ev).into())
+            .filter_map(|(ev, hs)| {
+                if !hs.iter().any(|h| Rc::ptr_eq(h, handler)) {
+                    Some((*ev).into())
+                } else {
+                    None
+                }
+            })
             .collect();
         println!("Flush completed {}", flush_events.len());
         output_kb.emit(&flush_events)?;
@@ -604,19 +623,22 @@ async fn main() -> Result<()> {
     let mut home_layer = Layer::new(HOME_LAYER_ID);
     let mut nav_layer = Layer::new(NAV_LAYER_ID);
 
-    // home_layer.add_handler(
-    //     Key::KEY_EJECTCLOSECD,
-    //     SingleKey::new(
-    //         Key::KEY_H,
-    //         Box::new(|pv| {
-    //             // println!("H {:?}", &pv.event);
-    //             pv.output_kb
-    //                 .emit(&[NiceKeyInputEvent::new(Key::KEY_0, pv.event.value).into()])?;
-    //             Ok(())
-    //         }),
-    //         None,
-    //     ),
-    // );
+    home_layer.add_handler(
+        Key::KEY_EJECTCLOSECD,
+        SingleKey::new(
+            Key::KEY_H,
+            Box::new(|pv| {
+                // println!("H {:?}", &pv.event);
+                //// TODO: Emit function that filters out non-real events and also logs a warning
+                if pv.event.is_real() {
+                    pv.output_kb
+                        .emit(&[NiceKeyInputEvent::new(Key::KEY_0, pv.event.value).into()])?;
+                }
+                Ok(())
+            }),
+            None,
+        ),
+    );
     // home_layer.add_handler(
     //     Key::KEY_EJECTCLOSECD,
     //     SingleKey::new(
