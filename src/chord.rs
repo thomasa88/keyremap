@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use anyhow::{ensure, Result};
 use evdev::Key;
@@ -7,32 +7,17 @@ use crate::{
     ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, ProcView,
 };
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum KeyState {
-    Released,
-    Pressed,
-}
-
-// pub struct Chord<'a> {
-//     keys: &'a [Key],
-//     action: ActionFn,
-// }
-
 pub struct ChordHandler {
-    // chord: Chord<'a>u
     action: ActionFn,
     state: HandlerState,
-    key_states: BTreeMap<Key, KeyState>,
+    keys: BTreeSet<Key>,
     num_pressed: usize,
 }
 
 impl ChordHandler {
     pub fn new(keys: &[Key], action: ActionFn) -> Self {
         Self {
-            key_states: keys
-                .iter()
-                .map(|key| (key.clone(), KeyState::Released))
-                .collect(),
+            keys: BTreeSet::from_iter(keys.iter().cloned()),
             action: action,
             state: HandlerState::Waiting,
             num_pressed: 0,
@@ -46,15 +31,8 @@ impl KeyEventHandler for ChordHandler {
         let mut handler_event = HandlerEvent::NoEvent;
         let event_key = pv.event.key;
 
-        if self.key_states.contains_key(&event_key) {
+        if self.keys.contains(&event_key) {
             // Key in chord
-            
-            let mut new_key_state_opt = match pv.event.value {
-                KeyEventValue::Press => Some(KeyState::Pressed),
-                KeyEventValue::Release => Some(KeyState::Released),
-                KeyEventValue::Repeat | KeyEventValue::QuickRepeat => None,
-            };
-
             match self.state {
                 HandlerState::Waiting => {
                     key_action = KeyAction::PassThrough;
@@ -76,22 +54,14 @@ impl KeyEventHandler for ChordHandler {
                     if pv.event.value == KeyEventValue::QuickRepeat && self.num_pressed == 1 {
                         // Allow a normal repeat of a key if it is the first of the chord
                         // The chord will be broken
-
-                        // Should not really need to check that the key is pressed,
-                        // as repeat implies pressed
-                        ensure!(*self.key_states.get(&event_key).unwrap() == KeyState::Pressed);
-
-                        //////// clean up
-                        new_key_state_opt = Some(KeyState::Released);
                         self.reset();
 
                         key_action = KeyAction::PassThrough;
                         handler_event = HandlerEvent::Aborted;
-                        self.state = HandlerState::Waiting;
                     } else if pv.event.value == KeyEventValue::Press {
                         self.num_pressed += 1;
 
-                        if self.num_pressed == self.key_states.len() {
+                        if self.num_pressed == self.keys.len() {
                             // Chord completed!
                             key_action = KeyAction::Discard;
                             handler_event = HandlerEvent::BuildComplete;
@@ -100,10 +70,6 @@ impl KeyEventHandler for ChordHandler {
                         }
                     } else if pv.event.value == KeyEventValue::Release {
                         // Chord is broken
-                        self.num_pressed -= 1;
-
-                        //////// clean up
-                        new_key_state_opt = Some(KeyState::Released);
                         self.reset();
 
                         key_action = KeyAction::PassThrough;
@@ -133,11 +99,6 @@ impl KeyEventHandler for ChordHandler {
                     }
                 }
             }
-
-            // Update with the latest state after processing with the old state
-            if let Some(new_key_state) = new_key_state_opt {
-                *self.key_states.get_mut(&event_key).unwrap() = new_key_state;
-            }
         } else {
             // Key not in chord
             key_action = KeyAction::PassThrough;
@@ -155,9 +116,6 @@ impl KeyEventHandler for ChordHandler {
     }
 
     fn reset(&mut self) {
-        self.key_states
-            .values_mut()
-            .for_each(|v| *v = KeyState::Released);
         self.num_pressed = 0;
         self.state = HandlerState::Waiting;
     }
