@@ -1,4 +1,9 @@
-use std::{any::type_name, cell::RefCell, fmt::Debug, rc::Rc};
+use std::{
+    any::type_name,
+    cell::RefCell,
+    fmt::{Debug, Display},
+    rc::Rc,
+};
 
 use crate::{
     ActionFn, HandlerEvent, HandlerRc, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
@@ -12,6 +17,12 @@ pub struct SingleKey {
     action: ActionFn,
     reset: Option<ResetFn>,
     state: HandlerState,
+}
+
+impl Display for SingleKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {:?} {:?}", type_name::<Self>(), self.key, self.state)
+    }
 }
 
 impl Debug for SingleKey {

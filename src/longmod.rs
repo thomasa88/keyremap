@@ -1,7 +1,13 @@
-use std::{any::type_name, cell::RefCell, fmt::Debug, rc::Rc};
+use std::{
+    any::type_name,
+    cell::RefCell,
+    fmt::{Debug, Display},
+    rc::Rc,
+};
 
 use crate::{
-    ActionFn, HandlerEvent, HandlerRc, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, NiceKeyInputEvent, ProcView
+    ActionFn, HandlerEvent, HandlerRc, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
+    NiceKeyInputEvent, ProcView,
 };
 use anyhow::Result;
 use evdev::Key;
@@ -12,10 +18,21 @@ pub struct LongPressModifier {
     new_key: Action,
     resets: bool,
 }
-
 pub enum Action {
     Key(Key),
     Fn(ActionFn),
+}
+
+impl Display for LongPressModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {:?} {:?}",
+            type_name::<Self>(),
+            self.orig_key,
+            self.state
+        )
+    }
 }
 
 impl Debug for LongPressModifier {

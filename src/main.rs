@@ -2,6 +2,7 @@ mod chord;
 mod longmod;
 mod single_key;
 
+use std::any::{type_name, type_name_of_val};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
@@ -77,7 +78,7 @@ type HandlerRc = Rc<RefCell<dyn KeyEventHandler>>;
 
 struct Layer {
     id: usize,
-    handlers: Vec<TaggedHandler>,
+    // handlers: Vec<TaggedHandler>,
     silence_unmapped: bool,
 }
 
@@ -85,7 +86,7 @@ impl Layer {
     fn new(id: usize) -> Self {
         Self {
             id,
-            handlers: vec![],
+            // handlers: vec![],
             silence_unmapped: false,
         }
     }
@@ -113,12 +114,12 @@ impl Layer {
     //     }
     // }
 
-    fn add_handler(&mut self, key_handler: HandlerRc) {
-        self.handlers.push(TaggedHandler {
-            handler: key_handler,
-            layer_id: self.id,
-        });
-    }
+    // fn add_handler(&mut self, key_handler: HandlerRc) {
+    //     self.handlers.push(TaggedHandler {
+    //         handler: key_handler,
+    //         layers: self.id,
+    //     });
+    // }
 }
 
 // #[derive(PartialEq, Eq, Hash)]
@@ -178,12 +179,9 @@ struct KeyEventFilter {
     key_code: u16,
 }
 
-trait KeyEventHandler: std::fmt::Debug {
-    // fn handle_event(&self, proc: &mut Processor) -> Result<HandleResult>;
+trait KeyEventHandler: Debug + Display {
     fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)>;
-    // fn reset(&mut self, pv: &mut ProcView);
     fn reset(&mut self);
-    // fn dyn_eq(&self, other: &Self);
     fn get_state(&self) -> HandlerState;
 }
 
@@ -228,7 +226,7 @@ fn is_active(state: HandlerState) -> bool {
     }
 }
 
-struct Processor<'a> {
+struct Processor {
     input_kb: Device,
     output_kb: VirtualDevice,
     //////// Not technically needed to store layers in Processor
@@ -239,7 +237,7 @@ struct Processor<'a> {
     // Possible alternative: Rc<Box<Layer>>?
     active_layer_id: usize,
     // active_layer: Option<&'a mut Layer>,
-    _phantom_data: std::marker::PhantomData<&'a ()>, // temp, while refactoring
+    all_handlers: Vec<TaggedHandler>,
 }
 
 struct ProcView<'v> {
@@ -252,16 +250,29 @@ struct ProcView<'v> {
 #[derive(Debug)]
 struct TaggedHandler {
     handler: HandlerRc,
-    // old: bool,
-    layer_id: usize,
+    // By having a list of layers inside each handler, we allow the to belong to multiple layers
+    // and can easily filter the total set of handlers for the handlers beloning to a specific
+    // layer. An alternative is to let the Layer type contain a list of handlers and don't store
+    // the layer ids with the handler. However, this makes it more complicated when switching layers,
+    // as the code will need to search the active layer for every handler that has completed tearing
+    // down, to see if it belongs to another layer and should be removed from the set of active handlers.
+    // Initially, this was accomplished together with providing one (1) layer ID for each handler,
+    // but that limited each handler (instance) to belong to only one (1) layer.
+    layers: Box<[usize]>,
+}
+
+impl Display for TaggedHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} {}", &self.layers, self.handler.borrow())
+    }
 }
 
 impl PartialEq for TaggedHandler {
     fn eq(&self, other: &Self) -> bool {
         //////////// problem: a handler added to multiple layers will have different layer_ids but point to the same handler and underlying state
-        assert!(!Rc::ptr_eq(&self.handler, &other.handler) || self.layer_id == other.layer_id,
+        assert!(!Rc::ptr_eq(&self.handler, &other.handler) || self.layers == other.layers,
                 "problem: a handler added to multiple layers will have different layer_ids but point to the same handler and underlying state");
-        self.layer_id == other.layer_id && Rc::ptr_eq(&self.handler, &other.handler)
+        self.layers == other.layers && Rc::ptr_eq(&self.handler, &other.handler)
     }
 }
 
@@ -279,16 +290,12 @@ impl PartialOrd for TaggedHandler {
     }
 }
 
-impl Eq for TaggedHandler {
-
-}
+impl Eq for TaggedHandler {}
 
 impl Ord for TaggedHandler {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.layer_id.cmp(&other.layer_id) {
-            Ordering::Equal => {
-                Rc::as_ptr(&self.handler).cmp(&Rc::as_ptr(&other.handler))
-            }
+        match self.layers.cmp(&other.layers) {
+            Ordering::Equal => Rc::as_ptr(&self.handler).cmp(&Rc::as_ptr(&other.handler)),
             cmp_res => cmp_res,
         }
     }
@@ -299,7 +306,7 @@ impl Ord for TaggedHandler {
 //     old: bool,
 // }
 
-impl<'p> Processor<'p> {
+impl Processor {
     fn new(input_kb: Device, output_kb: VirtualDevice, layers: Vec<Layer>) -> Self {
         assert!(layers.len() > 0);
         let first_layer_id = layers[0].id;
@@ -308,8 +315,15 @@ impl<'p> Processor<'p> {
             output_kb,
             layers: layers,
             active_layer_id: first_layer_id,
-            _phantom_data: PhantomData,
+            all_handlers: Vec::new(),
         }
+    }
+
+    fn add_handler(&mut self, for_layers: &[usize], key_handler: HandlerRc) {
+        self.all_handlers.push(TaggedHandler {
+            handler: key_handler,
+            layers: for_layers.into(),
+        })
     }
 
     // run() consumes self since Device.into_event_stream() needs to consume Device
@@ -334,7 +348,7 @@ impl<'p> Processor<'p> {
         let mut quick_repeats = VecDeque::<(Key, Instant)>::new();
         ////////// todo: possible to work with references instead of clones inside run()? all layer members should keep existing (at least if layers are not mutable)
         let mut key_queue: VecDeque<(NiceKeyInputEvent, Vec<&TaggedHandler>)> = VecDeque::new();
-        let mut handlers = Vec::new();
+        let mut handlers;
 
         {
             // let mut active_layer = self
@@ -344,11 +358,9 @@ impl<'p> Processor<'p> {
 
             //let handlers = &mut active_layer.handlers;
             handlers = self
-                .layers
-                .get(self.active_layer_id)
-                .context("No active layer set")?
-                .handlers
+                .all_handlers
                 .iter()
+                .filter(|th| th.layers.contains(&self.active_layer_id))
                 .collect_vec();
         }
         loop {
@@ -356,112 +368,98 @@ impl<'p> Processor<'p> {
                 Self::get_next_event(&mut input_stream, &mut quick_repeats, &mut self.output_kb)
                     .await?;
 
-            // let active_layer = self
-            //     .layers
-            //     .get_mut(self.active_layer_id)
-            //     .context("No active layer set")?;
-            let mut layer_switch = false;
-            let old_layer_id = self.active_layer_id;
-            // let filter = KeyEventFilter {
-            //     key_code: event.code(),
-            // };
-            // let silence_unmapped = active_layer.silence_unmapped;
             let mut holders = Vec::new();
             let nice_event = event.into();
             let mut final_key_action = KeyAction::PassThrough;
-            // let mut to_active = Vec::new();
-            // let mut to_inactive = Vec::new();
 
             let mut event_happened = false;
             let mut have_building_handlers = false;
+            let mut new_layer_id = self.active_layer_id;
             for hr in &*handlers {
-                // let HandlerRef { handler, old } = ho;
-                // if let Some(layer_handlers) = active_layer.handler_map.get_mut(&filter) {
-                ////////// This should not iterate over the handlers in active_handlers!!!
-                // for handler in layer_handlers
-                //     .iter()e
-                //     .filter(|h| !active_handlers.iter().any(|ah| Rc::ptr_eq(h, ah)))
-                {
-                    let old_state = hr.handler.borrow().get_state();
-                    let (key_action, handler_event) =
-                        hr.handler.borrow_mut().handle_event(&mut ProcView {
-                            event: &nice_event,
-                            active_layer_id: &mut self.active_layer_id,
-                            output_kb: &mut self.output_kb,
-                        })?;
-                    let new_state = hr.handler.borrow().get_state();
+                let old_state = hr.handler.borrow().get_state();
+                let (key_action, handler_event) =
+                    hr.handler.borrow_mut().handle_event(&mut ProcView {
+                        event: &nice_event,
+                        active_layer_id: &mut new_layer_id,
+                        output_kb: &mut self.output_kb,
+                    })?;
+                let new_state = hr.handler.borrow().get_state();
 
-                    if new_state == HandlerState::BuildingUp {
-                        have_building_handlers = true;
-                    }
+                if new_state == HandlerState::BuildingUp {
+                    have_building_handlers = true;
+                }
 
-                    if handler_event != HandlerEvent::NoEvent {
-                        event_happened = true;
+                if handler_event != HandlerEvent::NoEvent {
+                    event_happened = true;
 
-                        println!(
-                            "{:?} {:?} {:?} {:?} {:?} ",
-                            hr, nice_event.key, nice_event.value, key_action, handler_event
-                        );
-                    }
+                    println!(
+                        "{:?} -> {:?} {:?} {:?} {:?} ",
+                        nice_event,
+                        hr.layers,
+                        hr.handler.borrow(),
+                        key_action,
+                        handler_event
+                    );
+                }
 
-                    ensure!(
+                ensure!(
                         handler_event == HandlerEvent::NoEvent || new_state != old_state,
                         "Handler should change state when emitting handler event. {nice_event:?} -> Handler event: {handler_event:?}, for {:?} (old state: {old_state:?})", &hr.handler
                     );
-                    ensure!(
-                        !(hr.handler.borrow().get_state() == HandlerState::TearingDown
-                            && key_action == KeyAction::Hold),
-                        "Cannot hold keys while tearing down"
-                    );
+                ensure!(
+                    !(hr.handler.borrow().get_state() == HandlerState::TearingDown
+                        && key_action == KeyAction::Hold),
+                    "Cannot hold keys while tearing down"
+                );
 
-                    final_key_action = std::cmp::min(key_action, final_key_action);
+                final_key_action = std::cmp::min(key_action, final_key_action);
 
-                    match handler_event {
-                        HandlerEvent::BuildingStarted => {
-                            // to_active.push(&hr);
-                        }
-                        HandlerEvent::TeardownComplete => {
-                            // to_inactive.push(&hr);
-                        }
-                        HandlerEvent::Aborted => {
-                            // to_inactive.push(&hr);
-                            Self::flush_aborted_handler(
-                                &hr,
-                                &mut key_queue,
-                                // &mut handlers,
-                                &mut self.output_kb,
-                            )?;
-                        }
-                        HandlerEvent::BuildComplete => {
-                            // The key made a handler complete
-                            Self::flush_completed_handler(
-                                &hr,
-                                &mut key_queue,
-                                &handlers,
-                                &mut self.output_kb,
-                            )?;
-                        }
-                        HandlerEvent::NoEvent => (),
+                match handler_event {
+                    HandlerEvent::BuildingStarted => {
+                        // to_active.push(&hr);
                     }
-
-                    if self.active_layer_id != old_layer_id {
-                        layer_switch = true;
-                        break;
+                    HandlerEvent::TeardownComplete => {
+                        // to_inactive.push(&hr);
                     }
-
-                    if key_action == KeyAction::Hold {
-                        holders.push(*hr); //handler.clone());
-                    } else if key_action == KeyAction::Discard {
-                        // reset anything?
-                        // Key will not reach any other handler
-                        break;
+                    HandlerEvent::Aborted => {
+                        // to_inactive.push(&hr);
+                        Self::flush_aborted_handler(
+                            &hr,
+                            &mut key_queue,
+                            // &mut handlers,
+                            &mut self.output_kb,
+                        )?;
                     }
+                    HandlerEvent::BuildComplete => {
+                        // The key made a handler complete
+                        Self::flush_completed_handler(
+                            &hr,
+                            &mut key_queue,
+                            &handlers,
+                            &mut self.output_kb,
+                        )?;
+                    }
+                    HandlerEvent::NoEvent => (),
+                }
+
+                if new_layer_id != self.active_layer_id {
+                    break;
+                }
+
+                if key_action == KeyAction::Hold {
+                    holders.push(*hr); //handler.clone());
+                } else if key_action == KeyAction::Discard {
+                    // reset anything?
+                    // Key will not reach any other handler
+                    break;
                 }
             }
 
             if event_happened {
-                if layer_switch {
-                    // Abort all handlers that are building up
+                if new_layer_id != self.active_layer_id {
+                    // New layer ID already set by callback
+
+                    // Abort all handlers that are building up - they did not finish "in time"
                     for handler in handlers
                         .iter()
                         .filter(|th| th.handler.borrow().get_state() == HandlerState::BuildingUp)
@@ -473,27 +471,24 @@ impl<'p> Processor<'p> {
                     }
 
                     // Add the handlers of the "new" layer
-                    let active_layer = self
-                        .layers
-                        .get(self.active_layer_id)
-                        .context("Invalid layer")?;
-                    // handlers.extend(active_layer.handlers.iter().filter(|h| !handlers.iter().any(|hh| false)));
-                    //handlers.iter().unique_by(f)
-                    for new_handler in &active_layer.handlers {
+                    for new_handler in self
+                        .all_handlers
+                        .iter()
+                        .filter(|th| th.layers.contains(&self.active_layer_id))
+                    {
                         if !handlers.contains(&new_handler) {
                             handlers.push(new_handler);
                         }
                     }
 
-                    // New layer ID already set by callback
                     dbg!(self.active_layer_id);
                     dbg!(&handlers);
                 }
 
                 // Remove handlers that don't belong to the active layer - if they are not (still) tearing down
                 handlers.retain(|th| {
-                    th.layer_id == self.active_layer_id
-                        || th.handler.borrow().get_state() == HandlerState::TearingDown
+                    th.handler.borrow().get_state() == HandlerState::TearingDown
+                        || th.layers.contains(&self.active_layer_id)
                 });
 
                 // Order handlers by state.
@@ -511,31 +506,16 @@ impl<'p> Processor<'p> {
                 }
             }
 
-            // handlers.push(handlers.pop().unwrap());
-            // for handler in to_active {
-            //     active_handlers.push(handler.clone());
-            //     inactive_handlers.retain(|h| !Rc::ptr_eq(h, handler));
-            // }
-            // for handler in to_inactive {
-            //     inactive_handlers.push(handler.clone());
-            //     active_handlers.retain(|h| !Rc::ptr_eq(h, handler));
-            // }
-
-            if event.value() == KeyEventValue::Release as i32 {
-                ///// fix
-                // Clean any quick repeats
-                quick_repeats.retain(|(key, _time)| key.code() != event.code());
-            }
-
-            // let have_active_handlers = handlers.iter().any(|h| is_active(h.borrow().get_state()));
-            // let have_building_handlers = handlers
-            //     .iter()
-            //     .any(|h| h.handler.borrow().get_state() == HandlerState::BuildingUp);
-            if have_building_handlers && event.value() == KeyEventValue::Press as i32 {
-                quick_repeats.push_back((
-                    Key::new(event.code()),
-                    Instant::now() + Duration::from_millis(200),
-                ));
+            if have_building_handlers {
+                if nice_event.value == KeyEventValue::Release {
+                    // Clean any quick repeats for the key
+                    quick_repeats.retain(|(key, _time)| key.code() != event.code());
+                } else if nice_event.value == KeyEventValue::Press {
+                    quick_repeats.push_back((
+                        Key::new(event.code()),
+                        Instant::now() + Duration::from_millis(200),
+                    ));
+                }
             } else {
                 quick_repeats.clear();
             }
@@ -665,14 +645,15 @@ impl<'p> Processor<'p> {
 
         let mut overlapping_handlers = BTreeSet::new();
 
-        // Remove all held keys that are held by the handler
-        key_queue.retain(|(ev, hs)| {
+        // Discard all held keys that are held by the handler and discover
+        // any handlers that overlapped the handler.
+        key_queue.retain(|(_ev, hs)| {
             if hs.contains(&handler) {
-                for th in *hs {
-                    if th == handler {
+                for th in hs {
+                    if th == &handler {
                         continue;
                     }
-                    overlapping_handlers.insert(th);
+                    overlapping_handlers.insert(*th);
                 }
                 false
             } else {
@@ -680,47 +661,11 @@ impl<'p> Processor<'p> {
             }
         });
 
-        // Abort all overlapping handlers
+        // Abort all overlapping handlers and make sure that their held keys are flushed out
         for th in overlapping_handlers {
             th.handler.borrow_mut().reset();
-            
+            Self::flush_aborted_handler(th, key_queue, output_kb)?;
         }
-
-        for (ev, hs) in &mut *key_queue {
-            //hs.retain(|h| !Rc::ptr_eq(&h.handler, &handler.handler));
-            // if hs.contains(&handler) {
-
-            // }
-            if contiguous {
-                if !hs.is_empty() {
-                    contiguous = false;
-                } else {
-                    flush_events.push(ev.to_owned().into());
-                }
-            }
-        }
-
-        for h in handlers {
-            if Rc::ptr_eq(&h.handler, &handler.handler) {
-            } else {
-                h.handler.borrow_mut().reset();
-            }
-        }
-
-        // Flush events that was not held by `handler`
-        let flush_events: Vec<_> = key_queue
-            .into_iter()
-            .filter_map(|(ev, hs)| {
-                if !hs.iter().any(|h| Rc::ptr_eq(&h.handler, &handler.handler)) {
-                    Some((*ev).into())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        println!("Flush completed {}", flush_events.len());
-        output_kb.emit(&flush_events)?;
-        key_queue.clear();
 
         Ok(())
     }
@@ -748,6 +693,9 @@ async fn main() -> Result<()> {
     let mut home_layer = Layer::new(HOME_LAYER_ID);
     let mut nav_layer = Layer::new(NAV_LAYER_ID);
 
+    let layers = vec![home_layer, nav_layer];
+    let mut proc = Processor::new(input_kb, virt_kb, layers);
+
     let h_to_0 = SingleKey::new_rc(
         Key::KEY_H,
         Box::new(|pv| {
@@ -761,43 +709,46 @@ async fn main() -> Result<()> {
         }),
         None,
     );
-    home_layer.add_handler(h_to_0.clone());
-    // nav_layer.add_handler(h_to_0.clone());
-    // home_layer.add_handler(&LongPressModifier::new(
+    proc.add_handler(&[HOME_LAYER_ID, NAV_LAYER_ID], h_to_0);
+    // proc.add_handler(&[NAV_LAYER_ID], h_to_0.clone());
+    // proc.add_handler(&[HOME_LAYER_ID], &LongPressModifier::new(
     //     Key::KEY_D,
     //     longmod::Action::Key(Key::KEY_LEFTALT),
     // ));
 
-    home_layer.add_handler(LongPressModifier::new_rc(
-        Key::KEY_F,
-        longmod::Action::Fn(Box::new(|pv| {
-            if pv.event.value == KeyEventValue::QuickRepeat {
-                *pv.active_layer_id = NAV_LAYER_ID;
-                println!("Nav layer");
-            } else if pv.event.value == KeyEventValue::Release {
-                *pv.active_layer_id = HOME_LAYER_ID;
-                println!("Home layer");
-            }
-            Ok(())
-        })),
-    ));
-    // // home_layer.add_handler(
+    proc.add_handler(
+        &[HOME_LAYER_ID],
+        LongPressModifier::new_rc(
+            Key::KEY_F,
+            longmod::Action::Fn(Box::new(|pv| {
+                if pv.event.value == KeyEventValue::QuickRepeat {
+                    *pv.active_layer_id = NAV_LAYER_ID;
+                    println!("Nav layer");
+                } else if pv.event.value == KeyEventValue::Release {
+                    *pv.active_layer_id = HOME_LAYER_ID;
+                    println!("Home layer");
+                }
+                Ok(())
+            })),
+        ),
+    );
+    // // proc.add_handler(&[HOME_LAYER_ID],
     // //     Key::KEY_D,
     // //     LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT).no_reset(),
     // // );
-    // // home_layer.add_handler(
+    // // proc.add_handler(&[HOME_LAYER_ID],
     // //     Key::KEY_S,
     // //     LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
     // // );
-    // // nav_layer.add_handler(
+    // // proc.add_handler(&[NAV_LAYER_ID],
     // //     Key::KEY_D,
     // //     LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT).no_reset(),
     // // );
-    // // nav_layer.add_handler(
+    // // proc.add_handler(&[NAV_LAYER_ID],
     // //     Key::KEY_S,
     // //     LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
     // // );
-    // home_layer.add_handler(ChordHandler::new(
+    // proc.add_handler(&[HOME_LAYER_ID], ChordHandler::new(
     //     &[Key::KEY_U, Key::KEY_R],
     //     Box::new(|pv| {
     //         pv.output_kb.emit(
@@ -810,7 +761,7 @@ async fn main() -> Result<()> {
     //         Ok(())
     //     }),
     // ));
-    // home_layer.add_handler(ChordHandler::new(
+    // proc.add_handler(&[HOME_LAYER_ID], ChordHandler::new(
     //     &[Key::KEY_I, Key::KEY_O],
     //     Box::new(|pv| {
     //         pv.output_kb.emit(
@@ -825,45 +776,54 @@ async fn main() -> Result<()> {
     // ));
 
     // // nav_layer.silence_unmapped = true;
-    nav_layer.add_handler(SingleKey::new_rc(
-        Key::KEY_I,
-        Box::new(|pv| {
-            pv.output_kb
-                .emit(&[NiceKeyInputEvent::new(Key::KEY_UP, pv.event.value).into()])?;
-            Ok(())
-        }),
-        None,
-    ));
-    nav_layer.add_handler(SingleKey::new_rc(
-        Key::KEY_K,
-        Box::new(|p| {
-            p.output_kb
-                .emit(&[NiceKeyInputEvent::new(Key::KEY_DOWN, p.event.value).into()])?;
-            Ok(())
-        }),
-        None,
-    ));
-    nav_layer.add_handler(SingleKey::new_rc(
-        Key::KEY_J,
-        Box::new(|p| {
-            p.output_kb
-                .emit(&[NiceKeyInputEvent::new(Key::KEY_LEFT, p.event.value).into()])?;
-            Ok(())
-        }),
-        None,
-    ));
-    nav_layer.add_handler(SingleKey::new_rc(
-        Key::KEY_L,
-        Box::new(|p| {
-            p.output_kb
-                .emit(&[NiceKeyInputEvent::new(Key::KEY_RIGHT, p.event.value).into()])?;
-            Ok(())
-        }),
-        None,
-    ));
-
-    let layers = vec![home_layer, nav_layer];
-    let proc = Processor::new(input_kb, virt_kb, layers);
+    proc.add_handler(
+        &[NAV_LAYER_ID],
+        SingleKey::new_rc(
+            Key::KEY_I,
+            Box::new(|pv| {
+                pv.output_kb
+                    .emit(&[NiceKeyInputEvent::new(Key::KEY_UP, pv.event.value).into()])?;
+                Ok(())
+            }),
+            None,
+        ),
+    );
+    proc.add_handler(
+        &[NAV_LAYER_ID],
+        SingleKey::new_rc(
+            Key::KEY_K,
+            Box::new(|p| {
+                p.output_kb
+                    .emit(&[NiceKeyInputEvent::new(Key::KEY_DOWN, p.event.value).into()])?;
+                Ok(())
+            }),
+            None,
+        ),
+    );
+    proc.add_handler(
+        &[NAV_LAYER_ID],
+        SingleKey::new_rc(
+            Key::KEY_J,
+            Box::new(|p| {
+                p.output_kb
+                    .emit(&[NiceKeyInputEvent::new(Key::KEY_LEFT, p.event.value).into()])?;
+                Ok(())
+            }),
+            None,
+        ),
+    );
+    proc.add_handler(
+        &[NAV_LAYER_ID],
+        SingleKey::new_rc(
+            Key::KEY_L,
+            Box::new(|p| {
+                p.output_kb
+                    .emit(&[NiceKeyInputEvent::new(Key::KEY_RIGHT, p.event.value).into()])?;
+                Ok(())
+            }),
+            None,
+        ),
+    );
 
     proc.run().await?;
 

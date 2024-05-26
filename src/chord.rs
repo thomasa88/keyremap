@@ -1,4 +1,8 @@
-use std::{any::type_name, collections::BTreeSet, fmt::Debug};
+use std::{
+    any::type_name,
+    collections::BTreeSet,
+    fmt::{Debug, Display},
+};
 
 use anyhow::{ensure, Result};
 use evdev::Key;
@@ -12,6 +16,19 @@ pub struct ChordHandler {
     state: HandlerState,
     keys: BTreeSet<Key>,
     num_pressed: usize,
+}
+
+impl Display for ChordHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {:?} {:?} {}",
+            type_name::<Self>(),
+            self.keys,
+            self.state,
+            self.num_pressed
+        )
+    }
 }
 
 impl Debug for ChordHandler {
