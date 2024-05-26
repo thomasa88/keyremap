@@ -344,12 +344,6 @@ impl Processor {
         let mut handlers;
 
         {
-            // let mut active_layer = self
-            //     .layers
-            //     .get_mut(self.active_layer_id)
-            //     .context("No active layer set")?;
-
-            //let handlers = &mut active_layer.handlers;
             handlers = self
                 .all_handlers
                 .iter()
@@ -382,7 +376,7 @@ impl Processor {
                     have_building_handlers = true;
                 }
 
-                if handler_event != HandlerEvent::NoEvent || key_action != KeyAction::PassThrough {
+                if handler_event != HandlerEvent::NoEvent { //|| key_action != KeyAction::PassThrough {
                     event_happened = true;
 
                     println!(
@@ -444,7 +438,7 @@ impl Processor {
 
             if event_happened {
                 if new_layer_id != self.active_layer_id {
-                    // New layer ID already set by callback
+                    self.active_layer_id = new_layer_id;
 
                     // Abort all handlers that are building up - they did not finish "in time"
                     for handler in handlers
@@ -466,7 +460,6 @@ impl Processor {
                     }
 
                     dbg!(self.active_layer_id);
-                    dbg!(&handlers);
                 }
 
                 // Remove handlers that don't belong to the active layer - if they are not (still) tearing down
@@ -487,7 +480,6 @@ impl Processor {
                 }
                 // if event_result == HandlerState::Waiting && !silence_unmapped && nice_event.is_real()
                 else if final_key_action == KeyAction::PassThrough {
-                    println!("EMIT: {nice_event:?}");
                     self.output_kb.emit(&[event])?;
                 }
             }
