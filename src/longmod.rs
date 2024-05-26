@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    ActionFn, HandlerEvent, HandlerRc, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
+    ActionFn, HandlerEvent, HandlerBox, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
     NiceKeyInputEvent, ProcView,
 };
 use anyhow::Result;
@@ -55,9 +55,9 @@ impl LongPressModifier {
         }
     }
 
-    pub fn new_rc(orig_key: Key, new_key: Action) -> HandlerRc {
-        Rc::new(RefCell::new(Self::new(orig_key, new_key)))
-    }
+    // pub fn new_rc(orig_key: Key, new_key: Action) -> HandlerBox {
+    //     Rc::new(RefCell::new(Self::new(orig_key, new_key)))
+    // }
 
     pub fn no_reset(mut self) -> Self {
         self.resets = false;

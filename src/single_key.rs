@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    ActionFn, HandlerEvent, HandlerRc, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
+    ActionFn, HandlerBox, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
     ProcView, ResetFn,
 };
 use anyhow::{bail, Result};
@@ -42,10 +42,6 @@ impl SingleKey {
             reset,
             state: HandlerState::Waiting,
         }
-    }
-
-    pub fn new_rc(key: Key, action: ActionFn, reset: Option<ResetFn>) -> HandlerRc {
-        Rc::new(RefCell::new(Self::new(key, action, reset)))
     }
 }
 
