@@ -1,8 +1,8 @@
-use std::{any::type_name, fmt::Debug};
+use std::{any::type_name, cell::RefCell, fmt::Debug, rc::Rc};
 
 use crate::{
-    ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, ProcView,
-    ResetFn,
+    ActionFn, HandlerEvent, HandlerRc, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
+    ProcView, ResetFn,
 };
 use anyhow::{bail, Result};
 use evdev::Key;
@@ -31,6 +31,10 @@ impl SingleKey {
             reset,
             state: HandlerState::Waiting,
         }
+    }
+
+    pub fn new_rc(key: Key, action: ActionFn, reset: Option<ResetFn>) -> HandlerRc {
+        Rc::new(RefCell::new(Self::new(key, action, reset)))
     }
 }
 

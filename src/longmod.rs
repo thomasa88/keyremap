@@ -1,8 +1,7 @@
-use std::{any::type_name, fmt::Debug};
+use std::{any::type_name, cell::RefCell, fmt::Debug, rc::Rc};
 
 use crate::{
-    ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
-    NiceKeyInputEvent, ProcView,
+    ActionFn, HandlerEvent, HandlerRc, HandlerState, KeyAction, KeyEventHandler, KeyEventValue, NiceKeyInputEvent, ProcView
 };
 use anyhow::Result;
 use evdev::Key;
@@ -37,6 +36,10 @@ impl LongPressModifier {
             new_key,
             resets: true,
         }
+    }
+
+    pub fn new_rc(orig_key: Key, new_key: Action) -> HandlerRc {
+        Rc::new(RefCell::new(Self::new(orig_key, new_key)))
     }
 
     pub fn no_reset(mut self) -> Self {
