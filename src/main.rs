@@ -20,6 +20,7 @@ use std::{
 
 use anyhow::{ensure, Context, Result};
 use chord::ChordHandler;
+use clap::Parser;
 use evdev::{AttributeSetRef, Device, EventStream, EventType, InputEvent, Key};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -29,7 +30,7 @@ use num_traits::FromPrimitive;
 use scopeguard::{defer, guard};
 use single_key::SingleKey;
 use tokio::{pin, runtime::Handle, select, task::JoinSet, time::Instant};
-use tracing::event;
+use tracing::{debug, event, info};
 use tracing_subscriber::{filter, layer};
 use Iterator;
 
@@ -41,6 +42,15 @@ const QUICK_REPEAT_DELAY: Duration = Duration::from_millis(200);
 type ActionFn = Box<dyn FnMut(&mut ProcView) -> Result<()>>;
 type ResetFn = Box<dyn FnMut()>;
 type HandlerBox = Box<RefCell<dyn KeyEventHandler>>;
+
+#[derive(clap::Parser, Debug)]
+struct Args {
+    #[arg(long)]
+    debug: bool,
+
+    #[arg(short, long)]
+    keyboard: String,
+}
 
 struct LayerConfig {
     id: usize,
@@ -277,7 +287,7 @@ impl Processor {
                     //|| key_action != KeyAction::PassThrough {
                     handler_event_happened = true;
 
-                    println!(
+                    debug!(
                         "{:?} -> {:?} {:?} {:?} -> {:?}",
                         nice_event,
                         handler.layers,
@@ -357,7 +367,7 @@ impl Processor {
                         }
                     }
 
-                    dbg!(self.active_layer_id);
+                    debug!("Active layer: {}", self.active_layer_id);
                 }
 
                 // Remove handlers that don't belong to the active layer - if they are not (still) tearing down
@@ -474,7 +484,7 @@ impl Processor {
             }
         }
         key_queue.drain(0..flush_events.len());
-        println!("Flush {}", flush_events.len());
+        debug!("Flush {}", flush_events.len());
         output_kb.emit(&flush_events)?;
         Ok(())
     }
@@ -517,7 +527,22 @@ impl Processor {
 // Another alternative is async_executor::LocalExecutor (but can we sleep using it?)
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let input_kb = Device::open("/dev/input/by-id/usb-Logitech_USB_Receiver-if02-event-kbd")?;
+    let args = Args::parse();
+
+    let log_level = if args.debug {
+        tracing::level_filters::LevelFilter::DEBUG
+    } else {
+        tracing::level_filters::LevelFilter::INFO
+    };
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_max_level(log_level)
+            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+            .finish(),
+    )?;
+
+    let input_kb = Device::open(&args.keyboard)
+        .with_context(|| format!("Open keyboard \"{}\"", &args.keyboard))?;
 
     let supported_keys = input_kb.supported_keys().context("Failed to get keys")?;
     let virt_kb = VirtualDeviceBuilder::new()?
@@ -564,10 +589,10 @@ async fn main() -> Result<()> {
             longmod::Action::Fn(Box::new(|pv| {
                 if pv.event.value == KeyEventValue::QuickRepeat {
                     *pv.active_layer_id = NAV_LAYER_ID;
-                    println!("Nav layer");
+                    info!("Nav layer");
                 } else if pv.event.value == KeyEventValue::Release {
                     *pv.active_layer_id = HOME_LAYER_ID;
-                    println!("Home layer");
+                    info!("Home layer");
                 }
                 Ok(())
             })),
