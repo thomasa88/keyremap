@@ -22,6 +22,7 @@ use anyhow::{ensure, Context, Result};
 use chord::ChordHandler;
 use evdev::{AttributeSetRef, Device, EventStream, EventType, InputEvent, Key};
 use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use itertools::Itertools;
 use longmod::LongPressModifier;
 use num_traits::FromPrimitive;
@@ -376,7 +377,8 @@ impl Processor {
                     have_building_handlers = true;
                 }
 
-                if handler_event != HandlerEvent::NoEvent { //|| key_action != KeyAction::PassThrough {
+                if handler_event != HandlerEvent::NoEvent {
+                    //|| key_action != KeyAction::PassThrough {
                     event_happened = true;
 
                     println!(
@@ -507,15 +509,20 @@ impl Processor {
     ) -> Result<InputEvent> {
         // FuturesUnordered or some kind of stream might be an alternative to the multible branches
         // with select!.
+        // futures::FuturesUnordered wants the Future<> type to be the same for all pushes.
+        // tokio::JoinSet::spawn() tries to move the borrowed input_stream
+
+        async fn quick_repeat_wait(key: &Key, time: &Instant) -> InputEvent {
+            tokio::time::sleep_until(*time).await;
+            NiceKeyInputEvent {
+                key: *key,
+                value: KeyEventValue::QuickRepeat,
+            }
+            .into()
+        }
+
         let event = if let Some((key, time)) = quick_repeats.front() {
-            let quick_repeat_wait = async move {
-                tokio::time::sleep_until(*time).await;
-                NiceKeyInputEvent {
-                    key: *key,
-                    value: KeyEventValue::QuickRepeat,
-                }
-                .into()
-            };
+            let quick_repeat_wait = quick_repeat_wait(key, time);
             pin!(quick_repeat_wait);
             loop {
                 let ev = select! {
@@ -530,9 +537,7 @@ impl Processor {
             }
         } else {
             loop {
-                let ev = select! {
-                    val = input_stream.next_event() => val?,
-                };
+                let ev = input_stream.next_event().await?;
                 if ev.event_type() == EventType::KEY {
                     break ev;
                 } else {
