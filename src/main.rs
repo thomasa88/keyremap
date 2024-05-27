@@ -36,42 +36,7 @@ use Iterator;
 #[cfg(not(test))]
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 
-// Primitive mocking of VirtualDevice
-#[cfg(test)]
-#[derive(Default)]
-struct VirtualDevice {
-    log: Vec<InputEvent>,
-}
-
-#[cfg(test)]
-impl VirtualDevice {
-    fn emit(&mut self, messages: &[InputEvent]) -> Result<(), std::io::Error> {
-        self.log.extend(messages);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-struct VirtualDeviceBuilder {}
-
-#[cfg(test)]
-impl VirtualDeviceBuilder {
-    fn new() -> Result<Self> {
-        Ok(Self {})
-    }
-
-    fn name(&mut self, _: &str) -> &mut Self {
-        self
-    }
-
-    fn with_keys(&mut self, _: &AttributeSetRef<Key>) -> Result<&mut Self> {
-        Ok(self)
-    }
-
-    fn build(&mut self) -> Result<VirtualDevice> {
-        Ok(VirtualDevice::default())
-    }
-}
+const QUICK_REPEAT_DELAY: Duration = Duration::from_millis(200);
 
 type ActionFn = Box<dyn FnMut(&mut ProcView) -> Result<()>>;
 type ResetFn = Box<dyn FnMut()>;
@@ -87,48 +52,10 @@ impl Layer {
     fn new(id: usize) -> Self {
         Self {
             id,
-            // handlers: vec![],
             silence_unmapped: false,
         }
     }
-
-    // fn add_key_press(&mut self, key: Key, action: ActionFn, reset: Option<ResetFn>) {
-    //     let filter = KeyEventFilter {
-    //         key_code: key.code(),
-    //     };
-    //     self.handler_map
-    //         .entry(filter)
-    //         .or_default()
-    //         .push(Rc::new(RefCell::new(SingleKey::new(key, action, reset))));
-    // }
-
-    // fn add_chord(&mut self, keys: &[Key], action: ActionFn) {
-    //     let key_handler = Rc::new(RefCell::new(ChordHandler::new(keys, action)));
-    //     for key in keys {
-    //         let filter = KeyEventFilter {
-    //             key_code: key.code(),
-    //         };
-    //         self.handler_map
-    //             .entry(filter)
-    //             .or_default()
-    //             .push(key_handler.clone());
-    //     }
-    // }
-
-    // fn add_handler(&mut self, key_handler: HandlerRc) {
-    //     self.handlers.push(TaggedHandler {
-    //         handler: key_handler,
-    //         layers: self.id,
-    //     });
-    // }
 }
-
-// #[derive(PartialEq, Eq, Hash)]
-// enum KeyEventValue {
-//     Down,
-//     Up,
-//     // Both,
-// }
 
 #[derive(num_derive::FromPrimitive, Debug, PartialEq, Clone, Copy, Eq, Hash)]
 enum KeyEventValue {
@@ -214,19 +141,6 @@ enum KeyAction {
     PassThrough,
 }
 
-// enum HandlerResult {
-//     Hold,
-//     Complete,
-//     Inactive
-// }
-
-fn is_active(state: HandlerState) -> bool {
-    match state {
-        HandlerState::BuildingUp | HandlerState::TearingDown => true,
-        HandlerState::Waiting => false,
-    }
-}
-
 struct Processor {
     input_kb: Device,
     output_kb: VirtualDevice,
@@ -272,7 +186,6 @@ impl PartialEq for TaggedHandler {
     fn eq(&self, other: &Self) -> bool {
         self.layers == other.layers
             && std::ptr::addr_eq(self.handler.as_ptr(), other.handler.as_ptr())
-        //Rc::ptr_eq(&self.handler, &other.handler)
     }
 }
 
@@ -287,7 +200,7 @@ impl Eq for TaggedHandler {}
 impl Ord for TaggedHandler {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match self.layers.cmp(&other.layers) {
-            Ordering::Equal => self.handler.as_ptr().cmp(&other.handler.as_ptr()), //Rc::as_ptr(&self.handler).cmp(&Rc::as_ptr(&other.handler)),
+            Ordering::Equal => self.handler.as_ptr().cmp(&other.handler.as_ptr()),
             cmp_res => cmp_res,
         }
     }
@@ -305,13 +218,6 @@ impl Processor {
             all_handlers: Vec::new(),
         }
     }
-
-    // fn add_handler_box(&mut self, for_layers: &[usize], key_handler: HandlerBox) {
-    //     self.all_handlers.push(TaggedHandler {
-    //         handler: key_handler,
-    //         layers: for_layers.into(),
-    //     })
-    // }
 
     fn add_handler(&mut self, for_layers: &[usize], key_handler: impl KeyEventHandler + 'static) {
         self.all_handlers.push(TaggedHandler {
@@ -493,7 +399,7 @@ impl Processor {
                 } else if nice_event.value == KeyEventValue::Press {
                     quick_repeats.push_back((
                         Key::new(event.code()),
-                        Instant::now() + Duration::from_millis(200),
+                        Instant::now() + QUICK_REPEAT_DELAY
                     ));
                 }
             } else {
@@ -613,10 +519,6 @@ impl Processor {
         Ok(())
     }
 }
-
-// fn key_event(key: Key, action: KeyEventValue) -> InputEvent {
-//     InputEvent::new(EventType::KEY, key.code(), action as i32)
-// }
 
 // Tokio spawn() requires arguments to be Sync, even though it is only used on
 // one thread. Using tokio::task::LocalSet instead - to still have sleep.
@@ -777,6 +679,44 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+// Primitive mocking of VirtualDevice
+#[cfg(test)]
+#[derive(Default)]
+struct VirtualDevice {
+    log: Vec<InputEvent>,
+}
+
+#[cfg(test)]
+impl VirtualDevice {
+    fn emit(&mut self, messages: &[InputEvent]) -> Result<(), std::io::Error> {
+        self.log.extend(messages);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+struct VirtualDeviceBuilder {}
+
+#[cfg(test)]
+impl VirtualDeviceBuilder {
+    fn new() -> Result<Self> {
+        Ok(Self {})
+    }
+
+    fn name(&mut self, _: &str) -> &mut Self {
+        self
+    }
+
+    fn with_keys(&mut self, _: &AttributeSetRef<Key>) -> Result<&mut Self> {
+        Ok(self)
+    }
+
+    fn build(&mut self) -> Result<VirtualDevice> {
+        Ok(VirtualDevice::default())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
