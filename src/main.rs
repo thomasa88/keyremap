@@ -42,19 +42,9 @@ type ActionFn = Box<dyn FnMut(&mut ProcView) -> Result<()>>;
 type ResetFn = Box<dyn FnMut()>;
 type HandlerBox = Box<RefCell<dyn KeyEventHandler>>;
 
-struct Layer {
+struct LayerConfig {
     id: usize,
-    // handlers: Vec<TaggedHandler>,
     silence_unmapped: bool,
-}
-
-impl Layer {
-    fn new(id: usize) -> Self {
-        Self {
-            id,
-            silence_unmapped: false,
-        }
-    }
 }
 
 #[derive(num_derive::FromPrimitive, Debug, PartialEq, Clone, Copy, Eq, Hash)]
@@ -145,7 +135,7 @@ struct Processor {
     input_kb: Device,
     output_kb: VirtualDevice,
     //////// Not technically needed to store layers in Processor
-    layers: Vec<Layer>,
+    layers: Vec<LayerConfig>,
     // Using a usize, as we cannot store a reference to the layer:
     //  Tried to use reference both in Processor and in a key action closure:
     //   cannot borrow `first_layer` as mutable more than once at a time
@@ -207,7 +197,7 @@ impl Ord for TaggedHandler {
 }
 
 impl Processor {
-    fn new(input_kb: Device, output_kb: VirtualDevice, layers: Vec<Layer>) -> Self {
+    fn new(input_kb: Device, output_kb: VirtualDevice, layers: Vec<LayerConfig>) -> Self {
         assert!(layers.len() > 0);
         let first_layer_id = layers[0].id;
         Self {
@@ -266,7 +256,7 @@ impl Processor {
             let nice_event = event.into();
             let mut final_key_action = KeyAction::PassThrough;
 
-            let mut event_happened = false;
+            let mut handler_event_happened = false;
             let mut have_building_handlers = false;
             let mut new_layer_id = self.active_layer_id;
             for handler in &*handlers {
@@ -285,7 +275,7 @@ impl Processor {
 
                 if handler_event != HandlerEvent::NoEvent {
                     //|| key_action != KeyAction::PassThrough {
-                    event_happened = true;
+                    handler_event_happened = true;
 
                     println!(
                         "{:?} -> {:?} {:?} {:?} -> {:?}",
@@ -336,7 +326,7 @@ impl Processor {
                 }
 
                 if key_action == KeyAction::Hold {
-                    holders.push(*handler); //handler.clone());
+                    holders.push(*handler);
                 } else if key_action == KeyAction::Discard {
                     // reset anything?
                     // Key will not reach any other handler
@@ -344,7 +334,7 @@ impl Processor {
                 }
             }
 
-            if event_happened {
+            if handler_event_happened {
                 if new_layer_id != self.active_layer_id {
                     self.active_layer_id = new_layer_id;
 
@@ -385,9 +375,13 @@ impl Processor {
                 // Must push to key queue if the queue is not empty to avoid emitting a key before any held keys
                 if final_key_action == KeyAction::Hold || !key_queue.is_empty() {
                     key_queue.push_back((nice_event, holders));
-                }
-                // if event_result == HandlerState::Waiting && !silence_unmapped && nice_event.is_real()
-                else if final_key_action == KeyAction::PassThrough {
+                } else if final_key_action == KeyAction::PassThrough
+                    && !self
+                        .layers
+                        .get(self.active_layer_id)
+                        .context("Get silence unmapped from active layer")?
+                        .silence_unmapped
+                {
                     self.output_kb.emit(&[event])?;
                 }
             }
@@ -397,10 +391,8 @@ impl Processor {
                     // Clean any quick repeats for the key
                     quick_repeats.retain(|(key, _time)| key.code() != event.code());
                 } else if nice_event.value == KeyEventValue::Press {
-                    quick_repeats.push_back((
-                        Key::new(event.code()),
-                        Instant::now() + QUICK_REPEAT_DELAY
-                    ));
+                    quick_repeats
+                        .push_back((Key::new(event.code()), Instant::now() + QUICK_REPEAT_DELAY));
                 }
             } else {
                 quick_repeats.clear();
@@ -533,32 +525,37 @@ async fn main() -> Result<()> {
         .with_keys(&supported_keys)?
         .build()?;
 
+    // TODO: Figure out better setup for layers. Right now, the code expect the ids to be the position in
+    // the Vec. That is OK, but then the ID should be assigned automatically.
     const HOME_LAYER_ID: usize = 0;
     const NAV_LAYER_ID: usize = 1;
-    let mut home_layer = Layer::new(HOME_LAYER_ID);
-    let mut nav_layer = Layer::new(NAV_LAYER_ID);
+    let layer_configs = Vec::from([
+        LayerConfig {
+            id: HOME_LAYER_ID,
+            silence_unmapped: false,
+        },
+        LayerConfig {
+            id: NAV_LAYER_ID,
+            silence_unmapped: true,
+        },
+    ]);
 
-    let layers = vec![home_layer, nav_layer];
-    let mut proc = Processor::new(input_kb, virt_kb, layers);
+    let mut proc = Processor::new(input_kb, virt_kb, layer_configs);
 
-    let h_to_0 = SingleKey::new(
-        Key::KEY_H,
-        Box::new(|pv| {
-            // println!("H {:?}", &pv.event);
-            //// TODO: Emit function that filters out non-real events and also logs a warning
-            if pv.event.is_real() {
-                pv.output_kb
-                    .emit(&[NiceKeyInputEvent::new(Key::KEY_0, pv.event.value).into()])?;
-            }
-            Ok(())
-        }),
-        None,
-    );
-    proc.add_handler(&[HOME_LAYER_ID, NAV_LAYER_ID], h_to_0);
-    // proc.add_handler(&[HOME_LAYER_ID], &LongPressModifier::new(
-    //     Key::KEY_D,
-    //     longmod::Action::Key(Key::KEY_LEFTALT),
-    // ));
+    // let h_to_0 = SingleKey::new(
+    //     Key::KEY_H,
+    //     Box::new(|pv| {
+    //         // println!("H {:?}", &pv.event);
+    //         //// TODO: Emit function that filters out non-real events and also logs a warning
+    //         if pv.event.is_real() {
+    //             pv.output_kb
+    //                 .emit(&[NiceKeyInputEvent::new(Key::KEY_0, pv.event.value).into()])?;
+    //         }
+    //         Ok(())
+    //     }),
+    //     None,
+    // );
+    // proc.add_handler(&[HOME_LAYER_ID, NAV_LAYER_ID], h_to_0);
 
     proc.add_handler(
         &[HOME_LAYER_ID],
@@ -576,22 +573,14 @@ async fn main() -> Result<()> {
             })),
         ),
     );
-    // // proc.add_handler(&[HOME_LAYER_ID],
-    // //     Key::KEY_D,
-    // //     LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT).no_reset(),
-    // // );
-    // // proc.add_handler(&[HOME_LAYER_ID],
-    // //     Key::KEY_S,
-    // //     LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
-    // // );
-    // // proc.add_handler(&[NAV_LAYER_ID],
-    // //     Key::KEY_D,
-    // //     LongPressModifier::new(Key::KEY_D, Key::KEY_LEFTALT).no_reset(),
-    // // );
-    // // proc.add_handler(&[NAV_LAYER_ID],
-    // //     Key::KEY_S,
-    // //     LongPressModifier::new(Key::KEY_S, Key::KEY_LEFTCTRL).no_reset(),
-    // // );
+    proc.add_handler(
+        &[HOME_LAYER_ID, NAV_LAYER_ID],
+        LongPressModifier::new(Key::KEY_D, longmod::Action::Key(Key::KEY_LEFTALT)),
+    );
+    proc.add_handler(
+        &[HOME_LAYER_ID, NAV_LAYER_ID],
+        LongPressModifier::new(Key::KEY_S, longmod::Action::Key(Key::KEY_LEFTCTRL)),
+    );
     proc.add_handler(
         &[HOME_LAYER_ID],
         ChordHandler::new(
@@ -625,7 +614,6 @@ async fn main() -> Result<()> {
         ),
     );
 
-    // // nav_layer.silence_unmapped = true;
     proc.add_handler(
         &[NAV_LAYER_ID],
         SingleKey::new(
@@ -716,7 +704,6 @@ impl VirtualDeviceBuilder {
         Ok(VirtualDevice::default())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
