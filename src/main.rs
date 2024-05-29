@@ -2,41 +2,28 @@ mod chord;
 mod longmod;
 mod single_key;
 
-use std::any::{type_name, type_name_of_val};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
-use std::{
-    cell::{OnceCell, Ref, RefCell},
-    collections::{HashMap, HashSet, VecDeque},
-    fmt::Display,
-    io,
-    marker::PhantomData,
-    rc::Rc,
-    sync::Once,
-    time::Duration,
-    vec,
-};
+use std::{cell::RefCell, collections::VecDeque, fmt::Display, time::Duration};
 
 use anyhow::{ensure, Context, Result};
 use chord::ChordHandler;
 use clap::Parser;
-use evdev::{AttributeSetRef, Device, EventStream, EventType, InputEvent, Key};
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use evdev::{Device, EventStream, EventType, InputEvent, Key};
 use itertools::Itertools;
 use longmod::LongPressModifier;
 use num_traits::FromPrimitive;
-use scopeguard::{defer, guard};
+use scopeguard::guard;
 use single_key::SingleKey;
-use tokio::{pin, runtime::Handle, select, task::JoinSet, time::Instant};
-use tracing::{debug, event, info};
-use tracing_subscriber::{filter, layer};
+use tokio::{pin, select, time::Instant};
+use tracing::{debug, info};
 use Iterator;
 
 #[cfg(not(test))]
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 
+/// Delay for the synthetic [`KeyEventValue::QuickRepeat`] to occur after [`KeyEventValue::Press`]
 const QUICK_REPEAT_DELAY: Duration = Duration::from_millis(200);
 
 type ActionFn = Box<dyn FnMut(&mut ProcView) -> Result<()>>;
@@ -45,10 +32,12 @@ type HandlerBox = Box<RefCell<dyn KeyEventHandler>>;
 
 #[derive(clap::Parser, Debug)]
 struct Args {
+    /// Enables debug prints
     #[arg(long)]
     debug: bool,
 
-    #[arg(short, long)]
+    /// Keyboard evdev input device to use. Can be found in /dev/input/by-id.
+    #[arg(short, long, value_name = "INPUT_DEV")]
     keyboard: String,
 }
 
@@ -57,15 +46,18 @@ struct LayerConfig {
     silence_unmapped: bool,
 }
 
+/// Enum mapping of [`evdev::InputEvent::value()`]
 #[derive(num_derive::FromPrimitive, Debug, PartialEq, Clone, Copy, Eq, Hash)]
 enum KeyEventValue {
     Release = 0,
     Press = 1,
     Repeat = 2,
-    /// Injected event, that fires more quickly than Repeat. It is only fired once per Press.
+    /// Injected synthetic event, that fires more quickly than [`Self::Repeat`]. It is only fired once per [`Self::Press`].
+    /// It is used for reacting to "long presses", but more quickly than [`Self::Repeat`].
     QuickRepeat = 99,
 }
 
+/// A partial copy of [`evdev::InputEvent`], with members exposed as enums instead of integers.
 #[derive(Debug, Clone, Copy)]
 struct NiceKeyInputEvent {
     key: Key,
@@ -102,11 +94,10 @@ impl NiceKeyInputEvent {
     }
 }
 
-#[derive(Eq, Hash, PartialEq, Copy, Clone)]
-struct KeyEventFilter {
-    key_code: u16,
-}
-
+/// Receives keyboard input events and matches them to a set of internal conditions, such
+/// as a specific key or group of keys being pressed.
+///
+/// structs of this trait make up the main configuration of the application.
 trait KeyEventHandler: Debug + Display {
     fn handle_event(&mut self, pv: &mut ProcView) -> Result<(KeyAction, HandlerEvent)>;
     fn reset(&mut self);
@@ -114,25 +105,54 @@ trait KeyEventHandler: Debug + Display {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+/// Processing state of a [`KeyEventHandler`]
+///
+/// ![](../../../handler_state.drawio.svg)
+///
+/// See also [`HandlerEvent`].
+///
+/// First member has the highest priority.
+/// It is more important that a handler completes tearing down
+/// than a handler to start building up, so we don't get
+/// overlapped handling. Same for `BuildingUp` vs `Waiting`.
 enum HandlerState {
-    // First member has the highest prio
-    // It is more important that a handler completes tearing down
-    // than a handler to start building up, so we don't get
-    // overlapped handling. Same for BuildUp vs Waiting.
+    /// Handler requirements have been fulfilled and the handler is cleaning up.
+    /// Typically for key release events, complementary to the press events to fulfill the handler's conditions,
+    /// that should not be propagated.
     TearingDown,
+    /// Handler is still collecting key events, as key events matching the handler has been received,
+    /// but its condition has not been fulfilled.
+    /// E.g., a chord waiting for another key.
     BuildingUp,
+    /// Waiting to receive key events that match the handler
     Waiting,
 }
 
+/// Indicates a [`KeyEventHandler`] [state](`HandlerState`) transition.
+///
+/// Transition information is needed as a handler could transition to a new state
+/// for different reasons and [`Processor`] acts differently based on the handler
+/// event that happened. A transition to [`HandlerState::Waiting`] could
+/// occur both due to [`Self::Aborted`] and [`Self::TeardownComplete`] events.
+///
+/// ![](../../../handler_state.drawio.svg)
+///
+/// See also [`HandlerState`].
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum HandlerEvent {
+    /// Handler state is reset and any keys held in the key queue by the handler are released.
     Aborted,
+    /// Handler has started matching on the incoming key events.
     BuildingStarted,
+    /// The handler condition is fulfilled and it has fired its action.
     BuildComplete,
+    /// The handler has finished tearing down.
     TeardownComplete,
+    /// The handler has not changed its state.
     NoEvent,
 }
 
+/// Action for [`Processor`] to perform for the given key input event. Emitted by [`KeyEventHandler`].
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 enum KeyAction {
     // First member has the highest prio
@@ -141,20 +161,24 @@ enum KeyAction {
     PassThrough,
 }
 
+/// Processes input keyboard events, passes them through handlers and sends resulting output events.
+/// Keeps track of what key events are "held" by the handlers, blocking them from being emitted
+/// until they have been released (all handlers aborted) or discarding them (a handler has completed
+/// its condition).
+/// 
+/// ![](../../../processor_flow.drawio.svg)
 struct Processor {
     input_kb: Device,
     output_kb: VirtualDevice,
-    //////// Not technically needed to store layers in Processor
     layers: Vec<LayerConfig>,
-    // Using a usize, as we cannot store a reference to the layer:
-    //  Tried to use reference both in Processor and in a key action closure:
-    //   cannot borrow `first_layer` as mutable more than once at a time
-    // Possible alternative: Rc<Box<Layer>>?
+    /// ID of the currently active layer.
+    /// Using a `usize`, as it is not possible store a reference to the layer,
+    /// because would reference to another member of the same struct.
     active_layer_id: usize,
-    // active_layer: Option<&'a mut Layer>,
     all_handlers: Vec<TaggedHandler>,
 }
 
+/// Provides access a key event and [`Processor`] members to key event handlers, without hitting borrow limits.
 struct ProcView<'v> {
     // Provide full event, to allow for multiple keys handled by same handler as well as timeout handling
     event: &'v NiceKeyInputEvent,

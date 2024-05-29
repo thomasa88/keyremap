@@ -1,12 +1,10 @@
 use std::{
     any::type_name,
-    cell::RefCell,
     fmt::{Debug, Display},
-    rc::Rc,
 };
 
 use crate::{
-    ActionFn, HandlerBox, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
+    ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
     ProcView, ResetFn,
 };
 use anyhow::{bail, Result};

@@ -1,12 +1,10 @@
 use std::{
     any::type_name,
-    cell::RefCell,
     fmt::{Debug, Display},
-    rc::Rc,
 };
 
 use crate::{
-    ActionFn, HandlerEvent, HandlerBox, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
+    ActionFn, HandlerEvent, HandlerState, KeyAction, KeyEventHandler, KeyEventValue,
     NiceKeyInputEvent, ProcView,
 };
 use anyhow::Result;
@@ -24,13 +22,7 @@ pub enum Action {
 
 impl Display for LongPressModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} {:?} {:?}",
-            type_name::<Self>(),
-            self.key,
-            self.state
-        )
+        write!(f, "{} {:?} {:?}", type_name::<Self>(), self.key, self.state)
     }
 }
 
