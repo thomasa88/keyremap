@@ -1,16 +1,16 @@
 // keyremap - Simple programmable keyboard emulator written in Rust
 // Copyright (C) 2024  Thomas Axelsson
-// 
+//
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
-// 
+//
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
-// 
+//
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -93,30 +93,35 @@ impl KeyEventHandler for ChordHandler {
                         "At least one key should be pressed in building-up state"
                     );
 
-                    if pv.event.value == KeyEventValue::QuickRepeat && self.num_pressed == 1 {
-                        // Allow a normal repeat of a key if it is the first of the chord
-                        // The chord will be broken
-                        self.reset();
+                    match pv.event.value {
+                        KeyEventValue::QuickRepeat if self.num_pressed == 1 => {
+                            // Allow a normal repeat of a key if it is the first of the chord
+                            // The chord will be broken
+                            self.reset();
 
-                        key_action = KeyAction::PassThrough;
-                        handler_event = HandlerEvent::Aborted;
-                    } else if pv.event.value == KeyEventValue::Press {
-                        self.num_pressed += 1;
-
-                        if self.num_pressed == self.keys.len() {
-                            // Chord completed!
-                            key_action = KeyAction::Discard;
-                            handler_event = HandlerEvent::BuildComplete;
-                            self.state = HandlerState::TearingDown;
-                            (self.action)(pv)?;
+                            key_action = KeyAction::PassThrough;
+                            handler_event = HandlerEvent::Aborted;
                         }
-                    } else if pv.event.value == KeyEventValue::Release {
-                        // Chord is broken
-                        self.reset();
+                        KeyEventValue::Press => {
+                            self.num_pressed += 1;
 
-                        key_action = KeyAction::PassThrough;
-                        handler_event = HandlerEvent::Aborted;
-                        self.state = HandlerState::Waiting;
+                            if self.num_pressed == self.keys.len() {
+                                // Chord completed!
+                                key_action = KeyAction::Discard;
+                                handler_event = HandlerEvent::BuildComplete;
+                                self.state = HandlerState::TearingDown;
+                                (self.action)(pv)?;
+                            }
+                        }
+                        KeyEventValue::Release => {
+                            // Chord is broken
+                            self.reset();
+
+                            key_action = KeyAction::PassThrough;
+                            handler_event = HandlerEvent::Aborted;
+                            self.state = HandlerState::Waiting;
+                        }
+                        _ => (),
                     }
                 }
                 HandlerState::TearingDown => {
